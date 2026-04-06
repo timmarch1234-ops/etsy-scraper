@@ -1,0 +1,158 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Results — Etsy Scraper</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<header class="header">
+  <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+    <path stroke-linecap="round" stroke-linejoin="round" d="M21 21l-4.35-4.35M11 19a8 8 0 100-16 8 8 0 000 16z"/>
+  </svg>
+  <h1>Etsy Scraper</h1>
+  <nav class="header-nav">
+    <a href="index.html">Dashboard</a>
+    <a href="shortlist.html">All Products</a>
+  </nav>
+</header>
+
+<div class="container">
+
+  <a href="index.html" class="back-link">
+    <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+      <path stroke-linecap="round" stroke-linejoin="round" d="M15 19l-7-7 7-7"/>
+    </svg>
+    Back to Dashboard
+  </a>
+
+  <div class="search-info" id="searchInfo">
+    <div>
+      <h2 id="infoKeyword">Loading...</h2>
+    </div>
+    <div class="stats" id="infoStats"></div>
+  </div>
+
+  <div id="content"></div>
+
+</div>
+
+<script>
+(function () {
+  const params = new URLSearchParams(window.location.search);
+  const searchId = params.get('id');
+  if (!searchId) {
+    document.getElementById('content').innerHTML = '<div class="state-msg"><h3>No search ID provided</h3><p>Go back to the dashboard and select a search.</p></div>';
+    return;
+  }
+
+  const infoKeyword = document.getElementById('infoKeyword');
+  const infoStats = document.getElementById('infoStats');
+  const content = document.getElementById('content');
+  let refreshTimer = null;
+
+  function escHtml(str) {
+    const el = document.createElement('span');
+    el.textContent = str;
+    return el.innerHTML;
+  }
+
+  function statusBadge(status) {
+    const map = {
+      success:  'badge-success',
+      completed:'badge-success',
+      blocked:  'badge-blocked',
+      running:  'badge-running',
+      pending:  'badge-running',
+      error:    'badge-error',
+      failed:   'badge-error',
+    };
+    const cls = map[status] || 'badge-error';
+    return `<span class="badge ${cls}">${status}</span>`;
+  }
+
+  function renderListings(listings) {
+    if (!listings || listings.length === 0) {
+      content.innerHTML = '<div class="state-msg"><h3>No shortlisted listings</h3><p>No listings matched the shortlist criteria for this search.</p></div>';
+      return;
+    }
+
+    content.innerHTML = '<div class="listings-grid">' + listings.map(l => {
+      const img = l.screenshot
+        ? `<img class="card-img" src="/screenshots/${escHtml(l.screenshot)}" alt="" loading="lazy">`
+        : `<div class="card-img card-img-placeholder"><span>${escHtml((l.title || '?')[0].toUpperCase())}</span></div>`;
+
+      const soldBadge = l.soldLast24h
+        ? `<span class="card-sold">${escHtml(String(l.soldLast24h))} sold in last 24 hours</span>`
+        : '';
+
+      return `<div class="card">
+        ${img}
+        <div class="card-body">
+          <div class="card-title"><a href="${escHtml(l.url || l.etsyUrl || '#')}" target="_blank" rel="noopener">${escHtml(l.title || 'Untitled')}</a></div>
+          <div class="card-price">${escHtml(l.price || '—')}</div>
+          ${soldBadge}
+        </div>
+      </div>`;
+    }).join('') + '</div>';
+  }
+
+  function renderLoading(search) {
+    const totalPages = search.totalPages || 20;
+    const pagesScraped = search.pagesScraped || 0;
+    const pct = Math.min(100, Math.round((pagesScraped / totalPages) * 100));
+
+    content.innerHTML = `<div class="state-msg">
+      <div class="spinner"></div>
+      <h3>Search in progress...</h3>
+      <p>Scraped ${pagesScraped} of ${totalPages} pages (${pct}%)</p>
+      <div style="max-width:300px;margin:1rem auto 0">
+        <div class="progress-bar"><div class="fill" style="width:${pct}%"></div></div>
+      </div>
+    </div>`;
+  }
+
+  async function loadResults() {
+    try {
+      const res = await fetch('/api/searches/' + encodeURIComponent(searchId));
+      if (!res.ok) throw new Error(res.statusText);
+      const data = await res.json();
+
+      const search = data.search || data;
+      const listings = data.listings || search.listings || [];
+
+      infoKeyword.textContent = search.keyword || 'Unknown';
+      infoStats.innerHTML = `
+        ${statusBadge(search.status)}
+        <span>Scanned: <strong>${search.listingsScanned ?? 0}</strong></span>
+        <span>Shortlisted: <strong>${search.shortlisted ?? listings.length}</strong></span>
+      `;
+
+      const isRunning = search.status === 'running' || search.status === 'pending';
+
+      if (isRunning && listings.length === 0) {
+        renderLoading(search);
+      } else {
+        renderListings(listings);
+      }
+
+      if (isRunning && !refreshTimer) {
+        refreshTimer = setInterval(loadResults, 5000);
+      } else if (!isRunning && refreshTimer) {
+        clearInterval(refreshTimer);
+        refreshTimer = null;
+      }
+    } catch (err) {
+      console.error('Failed to load results:', err);
+      content.innerHTML = '<div class="state-msg"><h3>Error loading results</h3><p>' + escHtml(err.message) + '</p></div>';
+    }
+  }
+
+  loadResults();
+})();
+</script>
+
+</body>
+</html>

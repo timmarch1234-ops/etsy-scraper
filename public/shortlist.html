@@ -1,0 +1,95 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>All Products — Etsy Scraper</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<header class="header">
+  <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+    <path stroke-linecap="round" stroke-linejoin="round" d="M21 21l-4.35-4.35M11 19a8 8 0 100-16 8 8 0 000 16z"/>
+  </svg>
+  <h1>Etsy Scraper</h1>
+  <nav class="header-nav">
+    <a href="index.html">Dashboard</a>
+    <a href="shortlist.html">All Products</a>
+  </nav>
+</header>
+
+<div class="container">
+
+  <div class="search-info">
+    <div>
+      <h2>All Shortlisted Products</h2>
+    </div>
+    <div class="stats" id="stats"></div>
+  </div>
+
+  <div id="content">
+    <div class="state-msg"><div class="spinner"></div><h3>Loading...</h3></div>
+  </div>
+
+</div>
+
+<script>
+(function () {
+  const content = document.getElementById('content');
+  const stats = document.getElementById('stats');
+
+  function escHtml(str) {
+    const el = document.createElement('span');
+    el.textContent = str;
+    return el.innerHTML;
+  }
+
+  async function load() {
+    try {
+      const res = await fetch('/api/listings/all');
+      if (!res.ok) throw new Error(res.statusText);
+      const listings = await res.json();
+
+      const keywords = [...new Set(listings.map(l => l.keyword))];
+      stats.innerHTML = `
+        <span>Total: <strong>${listings.length}</strong></span>
+        <span>Searches: <strong>${keywords.length}</strong></span>
+      `;
+
+      if (!listings || listings.length === 0) {
+        content.innerHTML = '<div class="state-msg"><h3>No shortlisted products yet</h3><p>Run some searches from the dashboard to populate this list.</p></div>';
+        return;
+      }
+
+      content.innerHTML = '<div class="listings-grid">' + listings.map(l => {
+        const img = l.screenshot
+          ? `<img class="card-img" src="/screenshots/${escHtml(l.screenshot)}" alt="" loading="lazy">`
+          : `<div class="card-img card-img-placeholder"><span>${escHtml((l.title || '?')[0].toUpperCase())}</span></div>`;
+
+        const soldBadge = l.soldLast24h
+          ? `<span class="card-sold">${escHtml(String(l.soldLast24h))} sold in last 24 hours</span>`
+          : '';
+
+        return `<div class="card">
+          ${img}
+          <div class="card-body">
+            <div class="card-title"><a href="${escHtml(l.url || '#')}" target="_blank" rel="noopener">${escHtml(l.title || 'Untitled')}</a></div>
+            <div class="card-price">${escHtml(l.price || '\u2014')}</div>
+            ${soldBadge}
+            <span class="card-keyword">${escHtml(l.keyword || 'Unknown')}</span>
+          </div>
+        </div>`;
+      }).join('') + '</div>';
+    } catch (err) {
+      console.error('Failed to load listings:', err);
+      content.innerHTML = '<div class="state-msg"><h3>Error loading products</h3><p>' + escHtml(err.message) + '</p></div>';
+    }
+  }
+
+  load();
+})();
+</script>
+
+</body>
+</html>

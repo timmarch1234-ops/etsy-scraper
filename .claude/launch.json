@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "etsy-scraper",
+      "runtimeExecutable": "/opt/homebrew/bin/node",
+      "runtimeArgs": ["server.js"],
+      "port": 3000
+    }
+  ]
+}

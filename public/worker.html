@@ -1,0 +1,244 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Etsy Scraper Worker</title>
+  <style>
+    body { font-family: -apple-system, sans-serif; max-width: 800px; margin: 2rem auto; padding: 0 1rem; }
+    h2 { color: #0f172a; }
+    #log { background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 8px; padding: 1rem; height: 400px; overflow-y: auto; font-size: 13px; font-family: monospace; white-space: pre-wrap; }
+    .controls { margin: 1rem 0; display: flex; gap: 0.5rem; align-items: center; }
+    button { padding: 8px 16px; border: none; border-radius: 6px; background: #2563eb; color: #fff; font-weight: 600; cursor: pointer; }
+    button:disabled { opacity: 0.5; cursor: not-allowed; }
+    .stat { display: inline-block; padding: 4px 10px; background: #e2e8f0; border-radius: 6px; font-size: 13px; margin-right: 8px; }
+  </style>
+</head>
+<body>
+  <h2>Etsy Scraper Worker</h2>
+  <p>This page must stay open while scraping. It runs in the background and processes searches from the dashboard.</p>
+  <div class="controls">
+    <button id="startBtn" onclick="startPolling()">Start Polling</button>
+    <button id="stopBtn" onclick="stopPolling()" disabled>Stop</button>
+    <span class="stat" id="statusStat">Idle</span>
+  </div>
+  <div>
+    <span class="stat" id="pagesStat">Pages: 0/20</span>
+    <span class="stat" id="scannedStat">Scanned: 0</span>
+    <span class="stat" id="shortlistedStat">Shortlisted: 0</span>
+  </div>
+  <div id="log"></div>
+
+<script>
+const API = '/api';
+const logEl = document.getElementById('log');
+const statusStat = document.getElementById('statusStat');
+const pagesStat = document.getElementById('pagesStat');
+const scannedStat = document.getElementById('scannedStat');
+const shortlistedStat = document.getElementById('shortlistedStat');
+let polling = false;
+let pollTimer = null;
+
+function log(msg) {
+  const ts = new Date().toLocaleTimeString();
+  logEl.textContent += `[${ts}] ${msg}\n`;
+  logEl.scrollTop = logEl.scrollHeight;
+}
+
+function updateStats(pages, total, scanned, shortlisted) {
+  pagesStat.textContent = `Pages: ${pages}/${total}`;
+  scannedStat.textContent = `Scanned: ${scanned}`;
+  shortlistedStat.textContent = `Shortlisted: ${shortlisted}`;
+}
+
+function startPolling() {
+  polling = true;
+  document.getElementById('startBtn').disabled = true;
+  document.getElementById('stopBtn').disabled = false;
+  statusStat.textContent = 'Polling...';
+  log('Started polling for searches...');
+  pollForWork();
+}
+
+function stopPolling() {
+  polling = false;
+  document.getElementById('startBtn').disabled = false;
+  document.getElementById('stopBtn').disabled = true;
+  statusStat.textContent = 'Idle';
+  if (pollTimer) clearTimeout(pollTimer);
+  log('Stopped polling.');
+}
+
+async function pollForWork() {
+  if (!polling) return;
+  try {
+    const resp = await fetch(`${API}/searches`);
+    const searches = await resp.json();
+    const pending = searches.find(s => s.status === 'running' && s.pagesScraped === 0);
+    if (pending) {
+      log(`Found pending search: "${pending.keyword}" (${pending.id})`);
+      statusStat.textContent = `Scraping: ${pending.keyword}`;
+      await scrapeKeyword(pending.id, pending.keyword);
+      statusStat.textContent = 'Polling...';
+    }
+  } catch (e) {
+    log('Poll error: ' + e.message);
+  }
+  if (polling) pollTimer = setTimeout(pollForWork, 5000);
+}
+
+async function scrapeKeyword(searchId, keyword) {
+  const MAX_PAGES = 20;
+  const BATCH_SIZE = 3; // listings per fetch batch
+  const patterns = [
+    /(\d+)\s+sold\s+in\s+(?:the\s+)?last\s+24\s+hours/i,
+    /(\d+)\s+sold\s+recently/i,
+    /(\d+)\s+people\s+bought\s+this\s+in\s+the\s+last\s+24\s+hours/i,
+  ];
+
+  let totalScanned = 0;
+  let totalShortlisted = 0;
+
+  for (let page = 1; page <= MAX_PAGES; page++) {
+    if (!polling) { log('Stopped.'); break; }
+    log(`--- Page ${page}/${MAX_PAGES} ---`);
+
+    try {
+      // Fetch search results page via a hidden iframe to get cookies passed
+      const searchUrl = `https://www.etsy.com/search?q=${encodeURIComponent(keyword)}&page=${page}`;
+
+      // Use a proxy approach: open in new window, read content
+      // Actually we can't due to cross-origin. Let's use the scraper tab approach.
+      // We'll signal the parent to navigate, or use the API to queue page scrapes.
+
+      // Alternative: use XMLHttpRequest with credentials
+      const searchHtml = await fetchEtsyPage(searchUrl);
+      if (!searchHtml) {
+        log(`Page ${page}: Failed to load (possibly blocked)`);
+        // Wait and retry once
+        await delay(5000);
+        const retry = await fetchEtsyPage(searchUrl);
+        if (!retry) {
+          log(`Page ${page}: Blocked on retry, skipping`);
+          continue;
+        }
+      }
+
+      // Extract listing URLs
+      const urlMatches = searchHtml.match(/href="(https:\/\/www\.etsy\.com\/[a-z]{2}\/listing\/\d+\/[^"?]+)/g) || [];
+      const urls = [...new Set(urlMatches.map(m => m.slice(6)))];
+      log(`Page ${page}: Found ${urls.length} listings`);
+
+      // Process listings in small batches
+      for (let i = 0; i < urls.length; i += BATCH_SIZE) {
+        if (!polling) break;
+        const batch = urls.slice(i, i + BATCH_SIZE);
+
+        const results = await Promise.all(batch.map(async url => {
+          try {
+            const html = await fetchEtsyPage(url);
+            if (!html) return null;
+            for (const pat of patterns) {
+              const m = html.match(pat);
+              if (m) {
+                const tm = html.match(/<h1[^>]*>([\s\S]*?)<\/h1>/i);
+                const title = tm ? tm[1].replace(/<[^>]+>/g,'').trim().substring(0,200) : 'Untitled';
+                let price = '';
+                const pm = html.match(/((?:AU\$|US\$|USD|£|€|CA\$)\s*[\d.,]+)/);
+                if (pm) price = pm[1];
+                return { url, title, price, soldCount: parseInt(m[1],10) };
+              }
+            }
+          } catch {}
+          return null;
+        }));
+
+        const found = results.filter(Boolean);
+        totalScanned += batch.length;
+        totalShortlisted += found.length;
+
+        for (const item of found) {
+          log(`  SHORTLISTED: "${item.title.substring(0,60)}..." (${item.soldCount} sold)`);
+          await fetch(`${API}/searches/${searchId}/listings`, {
+            method: 'POST',
+            headers: {'Content-Type':'application/json'},
+            body: JSON.stringify(item)
+          });
+        }
+
+        await delay(500 + Math.random() * 500);
+      }
+
+      // Update progress
+      await fetch(`${API}/searches/${searchId}`, {
+        method: 'PATCH',
+        headers: {'Content-Type':'application/json'},
+        body: JSON.stringify({
+          pages_scanned: page,
+          listings_scanned: totalScanned,
+          listings_shortlisted: totalShortlisted
+        })
+      });
+      updateStats(page, MAX_PAGES, totalScanned, totalShortlisted);
+
+      log(`Page ${page} done. Scanned: ${totalScanned}, Shortlisted: ${totalShortlisted}`);
+      await delay(2000 + Math.random() * 3000); // delay between pages
+    } catch (e) {
+      log(`Page ${page} error: ${e.message}`);
+    }
+  }
+
+  // Mark complete
+  await fetch(`${API}/searches/${searchId}`, {
+    method: 'PATCH',
+    headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({
+      status: 'success',
+      pages_scanned: totalShortlisted > 0 ? MAX_PAGES : 0,
+      listings_scanned: totalScanned,
+      listings_shortlisted: totalShortlisted
+    })
+  });
+  log(`=== COMPLETE: ${totalScanned} scanned, ${totalShortlisted} shortlisted ===`);
+  updateStats(MAX_PAGES, MAX_PAGES, totalScanned, totalShortlisted);
+}
+
+// Fetch an Etsy page using a hidden iframe to inherit cookies
+async function fetchEtsyPage(url) {
+  return new Promise((resolve) => {
+    const iframe = document.createElement('iframe');
+    iframe.style.display = 'none';
+    iframe.sandbox = 'allow-same-origin';
+
+    const timeout = setTimeout(() => {
+      try { document.body.removeChild(iframe); } catch {}
+      resolve(null);
+    }, 15000);
+
+    iframe.onload = () => {
+      try {
+        // This will only work if same-origin
+        const html = iframe.contentDocument.documentElement.outerHTML;
+        clearTimeout(timeout);
+        document.body.removeChild(iframe);
+        resolve(html);
+      } catch (e) {
+        clearTimeout(timeout);
+        document.body.removeChild(iframe);
+        resolve(null);
+      }
+    };
+    iframe.onerror = () => {
+      clearTimeout(timeout);
+      try { document.body.removeChild(iframe); } catch {}
+      resolve(null);
+    };
+
+    iframe.src = url;
+    document.body.appendChild(iframe);
+  });
+}
+
+function delay(ms) { return new Promise(r => setTimeout(r, ms)); }
+</script>
+</body>
+</html>
