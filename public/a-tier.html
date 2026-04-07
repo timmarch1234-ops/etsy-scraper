@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>All Products — Etsy Scraper</title>
+  <title>A Tier — Etsy Scraper</title>
   <link rel="stylesheet" href="style.css">
 </head>
 <body>
@@ -23,21 +23,15 @@
 </header>
 
 <div class="container">
-
   <div class="search-info">
-    <div>
-      <h2>All Shortlisted Products</h2>
-    </div>
+    <div><h2>A Tier Products</h2></div>
     <div class="stats" id="stats"></div>
   </div>
-
   <div id="content">
     <div class="state-msg"><div class="spinner"></div><h3>Loading...</h3></div>
   </div>
-
 </div>
 
-<!-- Lightbox overlay -->
 <div id="lightbox" class="lightbox" onclick="closeLightbox()">
   <img id="lightboxImg" src="" alt="">
 </div>
@@ -54,6 +48,8 @@ function closeLightbox() {
 document.addEventListener('keydown', function(e) {
   if (e.key === 'Escape') closeLightbox();
 });
+
+const TIER = 'a';
 
 (function () {
   const content = document.getElementById('content');
@@ -94,18 +90,14 @@ document.addEventListener('keydown', function(e) {
 
   async function load() {
     try {
-      const res = await fetch('/api/listings/all');
+      const res = await fetch('/api/listings/tier/' + TIER);
       if (!res.ok) throw new Error(res.statusText);
       const listings = await res.json();
 
-      const keywords = [...new Set(listings.map(l => l.keyword))];
-      stats.innerHTML = `
-        <span>Total: <strong>${listings.length}</strong></span>
-        <span>Searches: <strong>${keywords.length}</strong></span>
-      `;
+      stats.innerHTML = `<span>Total: <strong>${listings.length}</strong></span>`;
 
       if (!listings || listings.length === 0) {
-        content.innerHTML = '<div class="state-msg"><h3>No shortlisted products yet</h3><p>Run some searches from the dashboard to populate this list.</p></div>';
+        content.innerHTML = '<div class="state-msg"><h3>No products in this tier</h3><p>Move products here from other pages.</p></div>';
         return;
       }
 
@@ -131,7 +123,7 @@ document.addEventListener('keydown', function(e) {
             ${soldBadge}
             ${screenshotLink}
             <span class="card-keyword">${escHtml(l.keyword || 'Unknown')}</span>
-            ${tierButtons(l.id, l.tier || 'pending')}
+            ${tierButtons(l.id, TIER)}
           </div>
         </div>`;
       }).join('') + '</div>';

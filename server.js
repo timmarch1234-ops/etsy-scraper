@@ -3,7 +3,7 @@ const path = require('path');
 const fs = require('fs');
 const { spawn } = require('child_process');
 const { v4: uuidv4 } = require('uuid');
-const { initDb, createSearch, updateSearch, getSearches, getSearch, addListing, getListings, getAllListings, updateListingImageByUrl, deleteSearch, clearAll } = require('./database');
+const { initDb, createSearch, updateSearch, getSearches, getSearch, addListing, getListings, getAllListings, updateListingImageByUrl, deleteSearch, clearAll, updateListingTier, getListingsByTier } = require('./database');
 
 const multer = require('multer');
 const app = express();
@@ -79,6 +79,7 @@ function transformListing(row) {
     screenshot: row.screenshot_path ? path.basename(row.screenshot_path) : null,
     imageUrl: row.image_url || null,
     createdAt: row.created_at,
+    tier: row.tier || 'pending',
   };
 }
 
@@ -694,6 +695,31 @@ app.post('/api/reset', (req, res) => {
   try {
     clearAll();
     res.json({ ok: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Update listing tier
+app.patch('/api/listings/:id/tier', (req, res) => {
+  try {
+    const { tier } = req.body;
+    const listing = updateListingTier(req.params.id, tier);
+    if (!listing) return res.status(404).json({ error: 'Listing not found' });
+    res.json(listing);
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+// Get listings by tier
+app.get('/api/listings/tier/:tier', (req, res) => {
+  try {
+    const listings = getListingsByTier(req.params.tier);
+    res.json(listings.map(row => ({
+      ...transformListing(row),
+      keyword: row.search_keyword,
+    })));
   } catch (err) {
     res.status(500).json({ error: err.message });
   }

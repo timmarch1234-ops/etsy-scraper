@@ -55,6 +55,12 @@ function initDb() {
     db.exec('CREATE UNIQUE INDEX idx_listings_search_url ON listings(search_id, url)');
   }
 
+  // Migration: add tier column if missing
+  const listingCols = db.pragma('table_info(listings)').map(c => c.name);
+  if (!listingCols.includes('tier')) {
+    db.exec("ALTER TABLE listings ADD COLUMN tier TEXT NOT NULL DEFAULT 'pending'");
+  }
+
   return db;
 }
 
@@ -135,6 +141,23 @@ function getAllListings() {
   `).all();
 }
 
+function updateListingTier(id, tier) {
+  const allowed = ['pending', 'rejected', 'a', 's'];
+  if (!allowed.includes(tier)) throw new Error('Invalid tier: ' + tier);
+  db.prepare('UPDATE listings SET tier = ? WHERE id = ?').run(tier, id);
+  return db.prepare('SELECT * FROM listings WHERE id = ?').get(id);
+}
+
+function getListingsByTier(tier) {
+  return db.prepare(`
+    SELECT l.*, s.keyword AS search_keyword
+    FROM listings l
+    JOIN searches s ON l.search_id = s.id
+    WHERE l.tier = ?
+    ORDER BY l.sold_count DESC
+  `).all(tier);
+}
+
 module.exports = {
   initDb,
   createSearch,
@@ -147,4 +170,6 @@ module.exports = {
   updateListingImageByUrl,
   deleteSearch,
   clearAll,
+  updateListingTier,
+  getListingsByTier,
 };
