@@ -78,9 +78,11 @@ function startScanner(searchId, keyword, captchaRetry = 0) {
       // CAPTCHA detected or process killed — delete stale profile clone, wait, and retry
       const waitSec = 30 + (captchaRetry * 15); // increasing backoff: 30s, 45s, 60s
       log(`Scanner for "${keyword}" hit CAPTCHA (exit ${code}). Deleting profile and retrying in ${waitSec}s... (attempt ${captchaRetry + 1}/${MAX_CAPTCHA_RETRIES})`);
+      // Kill any leftover Chrome on debug port
+      try { require('child_process').execSync('lsof -ti:9333 | xargs kill -9 2>/dev/null', { stdio: 'ignore' }); } catch {}
       try {
         require('child_process').execSync(`rm -rf "${PROFILE_DIR}/Default"`, { stdio: 'ignore' });
-        log('Deleted stale profile clone');
+        log('Deleted stale profile clone and killed Chrome');
       } catch {}
       setTimeout(() => {
         startScanner(searchId, keyword, captchaRetry + 1);

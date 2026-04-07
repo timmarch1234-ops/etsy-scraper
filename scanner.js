@@ -490,8 +490,8 @@ async function run(searchId, keyword) {
         });
         if (homeBlocked) {
           log('CAPTCHA detected on pre-flight. Exiting with code 42 for worker to retry with fresh profile.');
-          try { execSync(`lsof -ti:${DEBUG_PORT} | xargs kill -9 2>/dev/null`, { stdio: 'ignore' }); } catch {}
-          process.exit(42);
+          // Force immediate exit — worker will handle Chrome cleanup
+          setTimeout(() => process.exit(42), 100);
         } else {
           log('Pre-flight OK - Etsy homepage loaded successfully');
         }
