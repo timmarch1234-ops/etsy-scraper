@@ -55,9 +55,13 @@ async function pollForSearches() {
   }
 }
 
-function startScanner(searchId, keyword) {
+const CAPTCHA_EXIT_CODE = 42;
+const MAX_CAPTCHA_RETRIES = 3;
+const PROFILE_DIR = require('path').join(require('os').homedir(), '.etsy-scraper-profile');
+
+function startScanner(searchId, keyword, captchaRetry = 0) {
   activeScans.add(searchId);
-  log(`Starting local scanner for "${keyword}"...`);
+  log(`Starting local scanner for "${keyword}"${captchaRetry > 0 ? ` (CAPTCHA retry ${captchaRetry}/${MAX_CAPTCHA_RETRIES})` : ''}...`);
 
   const child = spawn(process.execPath, [SCANNER_PATH, searchId, keyword], {
     cwd: __dirname,
@@ -70,8 +74,24 @@ function startScanner(searchId, keyword) {
   });
 
   child.on('close', (code) => {
-    log(`Scanner for "${keyword}" exited with code ${code}`);
-    activeScans.delete(searchId);
+    if (code === CAPTCHA_EXIT_CODE && captchaRetry < MAX_CAPTCHA_RETRIES) {
+      // CAPTCHA detected — delete stale profile clone, wait, and retry
+      log(`Scanner for "${keyword}" hit CAPTCHA (exit 42). Deleting profile and retrying in 30s...`);
+      try {
+        require('child_process').execSync(`rm -rf "${PROFILE_DIR}/Default"`, { stdio: 'ignore' });
+        log('Deleted stale profile clone');
+      } catch {}
+      setTimeout(() => {
+        startScanner(searchId, keyword, captchaRetry + 1);
+      }, 30000);
+    } else {
+      if (code === CAPTCHA_EXIT_CODE) {
+        log(`Scanner for "${keyword}" hit CAPTCHA ${MAX_CAPTCHA_RETRIES} times. Giving up.`);
+      } else {
+        log(`Scanner for "${keyword}" exited with code ${code}`);
+      }
+      activeScans.delete(searchId);
+    }
   });
 
   child.on('error', (err) => {

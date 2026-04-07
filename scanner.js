@@ -473,53 +473,26 @@ async function run(searchId, keyword) {
 
     if (!IS_RAILWAY) {
       // Pre-flight: navigate to Etsy homepage first to warm up cookies/session (local only)
-      // If CAPTCHA detected, auto-recover by refreshing profile and relaunching Chrome
-      let preflightPassed = false;
-      for (let attempt = 1; attempt <= 3; attempt++) {
-        log(`Pre-flight (attempt ${attempt}/3): loading Etsy homepage to establish session...`);
-        try {
-          await searchPage.goto('https://www.etsy.com/', { waitUntil: 'networkidle2', timeout: 20000 });
-          await randomDelay(2000, 4000);
-          const homeBlocked = await searchPage.evaluate(() => {
-            const html = document.documentElement.innerHTML || '';
-            return html.includes('captcha-delivery') || html.includes('geo.captcha-delivery');
-          });
-          if (homeBlocked) {
-            log(`Pre-flight CAPTCHA detected (attempt ${attempt}/3)`);
-            if (attempt < 3) {
-              // Kill Chrome, force-refresh profile from real Chrome, relaunch
-              const recovered = await recoverFromCaptcha(browser);
-              browser = recovered.browser;
-              isLocal = recovered.isLocal;
-              // Re-create pages after relaunch
-              searchPage = await browser.newPage();
-              await setupPage(searchPage);
-              listingPages.length = 0;
-              for (let i = 0; i < PARALLEL_TABS; i++) {
-                const p = await browser.newPage();
-                await setupPage(p);
-                listingPages.push(p);
-              }
-              // Wait before retry with increasing backoff
-              const waitSec = 30 * attempt;
-              log(`Waiting ${waitSec}s before retry...`);
-              await new Promise(r => setTimeout(r, waitSec * 1000));
-              continue;
-            } else {
-              log('CAPTCHA persists after 3 profile refreshes. Setting status to blocked.');
-              await updateProgress(searchId, { status: 'blocked' });
-              return;
-            }
-          } else {
-            log('Pre-flight OK - Etsy homepage loaded successfully');
-            preflightPassed = true;
-            break;
-          }
-        } catch (err) {
-          log('Pre-flight warning:', err.message);
-          preflightPassed = true; // network error, try scanning anyway
-          break;
+      // If CAPTCHA detected, exit with code 42 so the worker can retry with a fresh profile
+      log('Pre-flight: loading Etsy homepage to establish session...');
+      try {
+        await searchPage.goto('https://www.etsy.com/', { waitUntil: 'networkidle2', timeout: 20000 });
+        await randomDelay(2000, 4000);
+        const homeBlocked = await searchPage.evaluate(() => {
+          const html = document.documentElement.innerHTML || '';
+          return html.includes('captcha-delivery') || html.includes('geo.captcha-delivery');
+        });
+        if (homeBlocked) {
+          log('CAPTCHA detected on pre-flight. Exiting with code 42 for worker to retry with fresh profile.');
+          // Clean up browser before exit
+          try { await browser.disconnect(); } catch {}
+          try { execSync(`lsof -ti:${DEBUG_PORT} | xargs kill -9 2>/dev/null`, { stdio: 'ignore' }); } catch {}
+          process.exit(42);
+        } else {
+          log('Pre-flight OK - Etsy homepage loaded successfully');
         }
+      } catch (err) {
+        log('Pre-flight warning:', err.message);
       }
     } else {
       // Railway mode: quick connectivity test before starting
@@ -628,31 +601,17 @@ async function run(searchId, keyword) {
           if (blocked) {
             consecutiveBlocks++;
             log(`Blocked on search page ${pageNum} (${blocked}), consecutive: ${consecutiveBlocks}`);
-            if (consecutiveBlocks >= 2) {
-              // After 2 consecutive blocks, try full recovery: kill Chrome, refresh profile, relaunch
-              log('CAPTCHA recovery: refreshing profile and relaunching browser...');
-              try {
-                const recovered = await recoverFromCaptcha(browser);
-                browser = recovered.browser;
-                isLocal = recovered.isLocal;
-                searchPage = await browser.newPage();
-                await setupPage(searchPage);
-                listingPages.length = 0;
-                for (let i = 0; i < PARALLEL_TABS; i++) {
-                  const p = await browser.newPage();
-                  await setupPage(p);
-                  listingPages.push(p);
-                }
-                log('Browser relaunched. Waiting 45s before retrying...');
-                await new Promise(r => setTimeout(r, 45000));
-                consecutiveBlocks = 0; // reset after recovery
-                pageNum--; // retry same page
-                continue;
-              } catch (recErr) {
-                log('Recovery failed:', recErr.message);
-                await updateProgress(searchId, { status: 'blocked' });
-                break;
-              }
+            if (consecutiveBlocks >= 3) {
+              // Save progress before exiting for retry
+              await updateProgress(searchId, {
+                pages_scanned: pagesCompleted,
+                listings_scanned: totalListingsScanned,
+                listings_shortlisted: totalShortlisted,
+              });
+              log('CAPTCHA persisting on search pages. Exiting with code 42 for worker to retry with fresh profile.');
+              try { await browser.disconnect(); } catch {}
+              try { execSync(`lsof -ti:${DEBUG_PORT} | xargs kill -9 2>/dev/null`, { stdio: 'ignore' }); } catch {}
+              process.exit(42);
             }
             const waitMs = Math.min(60000 + consecutiveBlocks * 30000, 120000);
             log(`Waiting ${waitMs/1000}s before retry...`);
