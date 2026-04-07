@@ -426,6 +426,7 @@ async function run(searchId, keyword) {
   let totalShortlisted = 0;
   let consecutiveBlocks = 0;
   let pagesCompleted = 0;
+  let captchaExit = false; // Flag for CAPTCHA exit code 42
   const reportedListingIds = new Set(); // Track reported listing IDs to prevent duplicates
   const startTime = Date.now();
 
@@ -484,10 +485,11 @@ async function run(searchId, keyword) {
         });
         if (homeBlocked) {
           log('CAPTCHA detected on pre-flight. Exiting with code 42 for worker to retry with fresh profile.');
-          // Clean up browser before exit
-          try { await browser.disconnect(); } catch {}
+          captchaExit = true;
           try { execSync(`lsof -ti:${DEBUG_PORT} | xargs kill -9 2>/dev/null`, { stdio: 'ignore' }); } catch {}
-          process.exit(42);
+          await new Promise(r => setTimeout(r, 500));
+          process.exitCode = 42;
+          return;
         } else {
           log('Pre-flight OK - Etsy homepage loaded successfully');
         }
@@ -609,9 +611,11 @@ async function run(searchId, keyword) {
                 listings_shortlisted: totalShortlisted,
               });
               log('CAPTCHA persisting on search pages. Exiting with code 42 for worker to retry with fresh profile.');
-              try { await browser.disconnect(); } catch {}
+              captchaExit = true;
               try { execSync(`lsof -ti:${DEBUG_PORT} | xargs kill -9 2>/dev/null`, { stdio: 'ignore' }); } catch {}
-              process.exit(42);
+              await new Promise(r => setTimeout(r, 500));
+              process.exitCode = 42;
+              return;
             }
             const waitMs = Math.min(60000 + consecutiveBlocks * 30000, 120000);
             log(`Waiting ${waitMs/1000}s before retry...`);

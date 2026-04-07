@@ -74,19 +74,20 @@ function startScanner(searchId, keyword, captchaRetry = 0) {
   });
 
   child.on('close', (code) => {
-    if (code === CAPTCHA_EXIT_CODE && captchaRetry < MAX_CAPTCHA_RETRIES) {
-      // CAPTCHA detected — delete stale profile clone, wait, and retry
-      log(`Scanner for "${keyword}" hit CAPTCHA (exit 42). Deleting profile and retrying in 30s...`);
+    if ((code === CAPTCHA_EXIT_CODE || code === null) && captchaRetry < MAX_CAPTCHA_RETRIES) {
+      // CAPTCHA detected or process killed — delete stale profile clone, wait, and retry
+      const waitSec = 30 + (captchaRetry * 15); // increasing backoff: 30s, 45s, 60s
+      log(`Scanner for "${keyword}" hit CAPTCHA (exit ${code}). Deleting profile and retrying in ${waitSec}s... (attempt ${captchaRetry + 1}/${MAX_CAPTCHA_RETRIES})`);
       try {
         require('child_process').execSync(`rm -rf "${PROFILE_DIR}/Default"`, { stdio: 'ignore' });
         log('Deleted stale profile clone');
       } catch {}
       setTimeout(() => {
         startScanner(searchId, keyword, captchaRetry + 1);
-      }, 30000);
+      }, waitSec * 1000);
     } else {
-      if (code === CAPTCHA_EXIT_CODE) {
-        log(`Scanner for "${keyword}" hit CAPTCHA ${MAX_CAPTCHA_RETRIES} times. Giving up.`);
+      if (code === CAPTCHA_EXIT_CODE || code === null) {
+        log(`Scanner for "${keyword}" hit CAPTCHA ${MAX_CAPTCHA_RETRIES} times. Giving up — IP may need manual CAPTCHA solve.`);
       } else {
         log(`Scanner for "${keyword}" exited with code ${code}`);
       }
