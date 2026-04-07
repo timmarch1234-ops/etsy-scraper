@@ -31,6 +31,7 @@ function initDb() {
       url TEXT,
       sold_count INTEGER,
       screenshot_path TEXT,
+      image_url TEXT,
       created_at TEXT NOT NULL
     );
   `);
@@ -70,13 +71,13 @@ function getSearch(id) {
   return db.prepare('SELECT * FROM searches WHERE id = ?').get(id);
 }
 
-function addListing(searchId, { title, price, url, soldCount, screenshotPath }) {
+function addListing(searchId, { title, price, url, soldCount, screenshotPath, imageUrl }) {
   const created_at = new Date().toISOString();
   const stmt = db.prepare(`
-    INSERT INTO listings (search_id, title, price, url, sold_count, screenshot_path, created_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?)
+    INSERT INTO listings (search_id, title, price, url, sold_count, screenshot_path, image_url, created_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
   `);
-  const info = stmt.run(searchId, title, price, url, soldCount, screenshotPath, created_at);
+  const info = stmt.run(searchId, title, price, url, soldCount, screenshotPath, imageUrl || null, created_at);
   return db.prepare('SELECT * FROM listings WHERE id = ?').get(info.lastInsertRowid);
 }
 
@@ -84,6 +85,20 @@ function getListings(searchId) {
   return db.prepare(
     'SELECT * FROM listings WHERE search_id = ? ORDER BY sold_count DESC'
   ).all(searchId);
+}
+
+function updateListingImageByUrl(listingUrl, imageUrl) {
+  return db.prepare('UPDATE listings SET image_url = ? WHERE url LIKE ?').run(imageUrl, listingUrl + '%');
+}
+
+function deleteSearch(id) {
+  db.prepare('DELETE FROM listings WHERE search_id = ?').run(id);
+  db.prepare('DELETE FROM searches WHERE id = ?').run(id);
+}
+
+function clearAll() {
+  db.exec('DELETE FROM listings');
+  db.exec('DELETE FROM searches');
 }
 
 function getAllListings() {
@@ -104,4 +119,7 @@ module.exports = {
   addListing,
   getListings,
   getAllListings,
+  updateListingImageByUrl,
+  deleteSearch,
+  clearAll,
 };

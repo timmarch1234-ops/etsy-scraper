@@ -39,7 +39,24 @@
 
 </div>
 
+<!-- Lightbox overlay -->
+<div id="lightbox" class="lightbox" onclick="closeLightbox()">
+  <img id="lightboxImg" src="" alt="">
+</div>
+
 <script>
+function openLightbox(src) {
+  var lb = document.getElementById('lightbox');
+  document.getElementById('lightboxImg').src = src;
+  lb.classList.add('active');
+}
+function closeLightbox() {
+  document.getElementById('lightbox').classList.remove('active');
+}
+document.addEventListener('keydown', function(e) {
+  if (e.key === 'Escape') closeLightbox();
+});
+
 (function () {
   const params = new URLSearchParams(window.location.search);
   const searchId = params.get('id');
@@ -80,20 +97,26 @@
     }
 
     content.innerHTML = '<div class="listings-grid">' + listings.map(l => {
-      const img = l.screenshot
-        ? `<img class="card-img" src="/screenshots/${escHtml(l.screenshot)}" alt="" loading="lazy">`
+      const imgSrc = l.imageUrl || '';
+      const img = imgSrc
+        ? `<img class="card-img" src="${escHtml(imgSrc)}" alt="" loading="lazy" onerror="this.outerHTML='<div class=\\'card-img card-img-placeholder\\'><span>${escHtml((l.title||'?')[0].toUpperCase())}</span></div>'">`
         : `<div class="card-img card-img-placeholder"><span>${escHtml((l.title || '?')[0].toUpperCase())}</span></div>`;
 
       const soldBadge = l.soldLast24h
         ? `<span class="card-sold">${escHtml(String(l.soldLast24h))} sold in last 24 hours</span>`
         : '';
 
+      const screenshotLink = l.screenshot
+        ? `<a href="#" class="screenshot-link" onclick="event.preventDefault();openLightbox('/screenshots/${escHtml(l.screenshot)}')">View screenshot</a>`
+        : '';
+
       return `<div class="card">
         ${img}
         <div class="card-body">
           <div class="card-title"><a href="${escHtml(l.url || l.etsyUrl || '#')}" target="_blank" rel="noopener">${escHtml(l.title || 'Untitled')}</a></div>
-          <div class="card-price">${escHtml(l.price || '—')}</div>
+          <div class="card-price">${escHtml(l.price || '\u2014')}</div>
           ${soldBadge}
+          ${screenshotLink}
         </div>
       </div>`;
     }).join('') + '</div>';
@@ -102,15 +125,18 @@
   function renderLoading(search) {
     const totalPages = search.totalPages || 20;
     const pagesScraped = search.pagesScraped || 0;
+    const scanned = search.listingsScanned || 0;
+    const shortlisted = search.shortlisted || 0;
     const pct = Math.min(100, Math.round((pagesScraped / totalPages) * 100));
 
     content.innerHTML = `<div class="state-msg">
       <div class="spinner"></div>
       <h3>Search in progress...</h3>
-      <p>Scraped ${pagesScraped} of ${totalPages} pages (${pct}%)</p>
+      <p>Pages: ${pagesScraped}/${totalPages} &bull; Listings scanned: ${scanned} &bull; Shortlisted: ${shortlisted}</p>
       <div style="max-width:300px;margin:1rem auto 0">
         <div class="progress-bar"><div class="fill" style="width:${pct}%"></div></div>
       </div>
+      <p style="font-size:13px;color:#888;margin-top:12px">The Chrome extension is scanning Etsy listings. This tab auto-refreshes.</p>
     </div>`;
   }
 
@@ -134,6 +160,16 @@
 
       if (isRunning && listings.length === 0) {
         renderLoading(search);
+      } else if (isRunning && listings.length > 0) {
+        // Show listings found so far + progress indicator
+        renderListings(listings);
+        // Add a progress banner at top
+        const banner = document.createElement('div');
+        banner.className = 'state-msg';
+        banner.style.marginBottom = '1rem';
+        banner.innerHTML = `<div class="spinner" style="width:20px;height:20px;border-width:2px;display:inline-block;vertical-align:middle;margin-right:8px"></div>
+          <span>Still scanning... ${search.listingsScanned || 0} listings checked, ${listings.length} shortlisted so far</span>`;
+        content.insertBefore(banner, content.firstChild);
       } else {
         renderListings(listings);
       }

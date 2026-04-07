@@ -48,6 +48,17 @@
 </div>
 
 <script>
+async function deleteSearch(id) {
+  if (!confirm('Delete this search and all its listings?')) return;
+  try {
+    const res = await fetch('/api/searches/' + id, { method: 'DELETE' });
+    if (!res.ok) throw new Error(res.statusText);
+    location.reload();
+  } catch (err) {
+    alert('Failed to delete: ' + err.message);
+  }
+}
+
 (function () {
   const tableBody = document.getElementById('tableBody');
   const searchForm = document.getElementById('searchForm');
@@ -97,7 +108,10 @@
           <div class="progress-bar"><div class="fill" style="width:${pct}%"></div></div>
           <div class="progress-text">${pagesScraped}/${totalPages} pages (${pct}%)</div>
         </td>
-        <td><a href="results.html?id=${s.id}">View Results</a></td>
+        <td>
+          <a href="results.html?id=${s.id}">View Results</a>
+          <button class="btn-delete" onclick="deleteSearch('${s.id}')">Delete</button>
+        </td>
       </tr>`;
     }).join('');
   }
@@ -143,12 +157,23 @@
         body: JSON.stringify({ keyword }),
       });
       if (!res.ok) throw new Error(res.statusText);
+      const data = await res.json();
+
+      // Trigger server-side Puppeteer scanner
+      try {
+        await fetch('/api/searches/' + data.id + '/start-scan', { method: 'POST' });
+      } catch (scanErr) {
+        console.warn('Failed to start server scanner (extension fallback may still work):', scanErr);
+      }
+
       keywordInput.value = '';
       await loadSearches();
       // Ensure auto-refresh is going
       if (!refreshTimer) {
         refreshTimer = setInterval(loadSearches, 5000);
       }
+      // Navigate to results page so user can watch progress
+      window.location.href = 'results.html?id=' + data.id;
     } catch (err) {
       console.error('Failed to start search:', err);
       alert('Failed to start search. Check the console for details.');

@@ -300,15 +300,17 @@ async function scrapeKeyword(searchId, keyword) {
           if (salesData && salesData.found) {
             const meta = await executeScript(tabId, extractListingMeta);
 
-            // Scroll sales text into view for screenshot
-            await executeScript(tabId, scrollSalesIntoView);
-            await randomDelay(500, 1000);
-
-            // Bring tab to front briefly for screenshot
-            await new Promise((r) => chrome.tabs.update(tabId, { active: true }, r));
+            // Scroll to top so screenshot shows the product image, title, price
+            await executeScript(tabId, function () {
+              window.scrollTo(0, 0);
+            });
             await randomDelay(300, 500);
 
-            // Capture screenshot as data URL
+            // Bring tab to front for screenshot and wait for full render
+            await new Promise((r) => chrome.tabs.update(tabId, { active: true }, r));
+            await randomDelay(1500, 2500);
+
+            // Capture screenshot as data URL (real visible tab capture)
             const screenshotDataUrl = await captureScreenshot(tabId);
 
             currentJob.listingsShortlisted++;
@@ -377,10 +379,38 @@ async function pollForSearches() {
   }
 }
 
-// Poll every 5 seconds
+// ---------------------------------------------------------------------------
+// Keepalive & polling via chrome.alarms (MV3 service worker safe)
+// ---------------------------------------------------------------------------
+
+// Use chrome.alarms to reliably wake the service worker
+// Minimum alarm interval is 0.5 minutes in production, but we also use
+// setInterval as a fallback when the worker is already awake.
+
+chrome.alarms.create('pollSearches', { periodInMinutes: 0.5 });
+chrome.alarms.create('keepAlive', { periodInMinutes: 0.25 });
+
+chrome.alarms.onAlarm.addListener((alarm) => {
+  if (alarm.name === 'pollSearches' || alarm.name === 'keepAlive') {
+    pollForSearches();
+  }
+});
+
+// Also use setInterval for faster polling while worker is awake (5s)
 setInterval(pollForSearches, 5000);
 
-// Also poll immediately on install/start
+// Poll immediately on install/start
+chrome.runtime.onInstalled.addListener(() => {
+  console.log('[scraper] Extension installed/updated');
+  pollForSearches();
+});
+
+chrome.runtime.onStartup.addListener(() => {
+  console.log('[scraper] Browser started');
+  pollForSearches();
+});
+
+// Immediate poll
 pollForSearches();
 
 // ---------------------------------------------------------------------------
@@ -394,6 +424,28 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         ? { active: true, ...currentJob }
         : { active: false }
     );
+  }
+  if (msg.type === 'forcePolls') {
+    pollForSearches();
+    sendResponse({ ok: true });
+  }
+  if (msg.type === 'newSearch') {
+    console.log(`[scraper] Received newSearch from dashboard: "${msg.keyword}" (${msg.searchId})`);
+    // Immediately start scraping if not busy
+    if (!currentJob) {
+      scrapeKeyword(msg.searchId, msg.keyword);
+      sendResponse({ ok: true, started: true });
+    } else {
+      console.log(`[scraper] Already busy with "${currentJob.keyword}", will pick up "${msg.keyword}" after`);
+      sendResponse({ ok: true, started: false, busy: true, currentKeyword: currentJob.keyword });
+    }
+  }
+  if (msg.type === 'keepAlive') {
+    sendResponse({
+      alive: true,
+      busy: !!currentJob,
+      currentJob: currentJob ? { keyword: currentJob.keyword, scanned: currentJob.listingsScanned, shortlisted: currentJob.listingsShortlisted } : null,
+    });
   }
   return true;
 });

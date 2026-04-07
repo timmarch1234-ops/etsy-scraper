@@ -1,12 +1,13 @@
 {
   "manifest_version": 3,
   "name": "Etsy Scraper",
-  "version": "1.0",
+  "version": "2.0",
   "description": "Scrapes Etsy listings for the Etsy Scraper dashboard",
   "permissions": [
     "tabs",
     "activeTab",
-    "scripting"
+    "scripting",
+    "alarms"
   ],
   "host_permissions": [
     "https://www.etsy.com/*",
@@ -15,6 +16,13 @@
   "background": {
     "service_worker": "background.js"
   },
+  "content_scripts": [
+    {
+      "matches": ["http://localhost:3000/*"],
+      "js": ["content.js"],
+      "run_at": "document_idle"
+    }
+  ],
   "action": {
     "default_popup": "popup.html"
   }
