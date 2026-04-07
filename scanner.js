@@ -12,6 +12,11 @@ const path = require('path');
 const fs = require('fs');
 const os = require('os');
 
+// Prevent unhandled rejections from crashing the process (e.g. during CAPTCHA recovery)
+process.on('unhandledRejection', (err) => {
+  log('Unhandled rejection (suppressed):', err?.message || err);
+});
+
 const IS_RAILWAY = !!process.env.RAILWAY_ENVIRONMENT || !!process.env.RAILWAY_PROJECT_ID;
 const SERVER_BASE = process.env.SERVER_BASE || 'http://localhost:3000';
 const SCREENSHOT_DIR = path.join(__dirname, 'public', 'screenshots');
@@ -485,11 +490,8 @@ async function run(searchId, keyword) {
         });
         if (homeBlocked) {
           log('CAPTCHA detected on pre-flight. Exiting with code 42 for worker to retry with fresh profile.');
-          captchaExit = true;
           try { execSync(`lsof -ti:${DEBUG_PORT} | xargs kill -9 2>/dev/null`, { stdio: 'ignore' }); } catch {}
-          await new Promise(r => setTimeout(r, 500));
-          process.exitCode = 42;
-          return;
+          process.exit(42);
         } else {
           log('Pre-flight OK - Etsy homepage loaded successfully');
         }
