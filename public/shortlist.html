@@ -15,10 +15,10 @@
   <h1>Etsy Scraper</h1>
   <nav class="header-nav">
     <a href="index.html">Dashboard</a>
-    <a href="s-tier.html">S Tier</a>
-    <a href="a-tier.html">A Tier</a>
     <a href="pending.html">Pending</a>
     <a href="rejected.html">Rejected</a>
+    <a href="a-tier.html">A Tier</a>
+    <a href="s-tier.html">S Tier</a>
   </nav>
 </header>
 
@@ -67,10 +67,10 @@ document.addEventListener('keydown', function(e) {
 
   function tierButtons(listingId, currentTier) {
     const tiers = [
-      { value: 's', label: 'S Tier', cls: 'tier-btn-s' },
-      { value: 'a', label: 'A Tier', cls: 'tier-btn-a' },
       { value: 'pending', label: 'Pending', cls: 'tier-btn-pending' },
       { value: 'rejected', label: 'Rejected', cls: 'tier-btn-rejected' },
+      { value: 'a', label: 'A Tier', cls: 'tier-btn-a' },
+      { value: 's', label: 'S Tier', cls: 'tier-btn-s' },
     ];
     return '<div class="tier-buttons">' + tiers.map(t => {
       const active = t.value === currentTier ? ' tier-btn-active' : '';
