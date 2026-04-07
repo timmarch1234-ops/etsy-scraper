@@ -779,14 +779,18 @@ async function run(searchId, keyword) {
     log('Fatal error:', err.message, err.stack);
     await updateProgress(searchId, { status: 'error' });
   } finally {
-    try {
-      if (isLocal) {
-        await browser.disconnect();
-        execSync(`lsof -ti:${DEBUG_PORT} | xargs kill -9 2>/dev/null`, { stdio: 'ignore' });
-      } else {
-        await browser.close();
-      }
-    } catch {}
+    if (!captchaExit) {
+      try {
+        if (isLocal) {
+          await browser.disconnect();
+          execSync(`lsof -ti:${DEBUG_PORT} | xargs kill -9 2>/dev/null`, { stdio: 'ignore' });
+        } else {
+          await browser.close();
+        }
+      } catch {}
+    }
+    // Ensure CAPTCHA exit code is preserved
+    if (captchaExit) process.exitCode = 42;
   }
 }
 
