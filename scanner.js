@@ -410,6 +410,7 @@ async function run(searchId, keyword) {
   let totalShortlisted = 0;
   let consecutiveBlocks = 0;
   let pagesCompleted = 0;
+  const reportedListingIds = new Set(); // Track reported listing IDs to prevent duplicates
   const startTime = Date.now();
 
   const REALISTIC_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
@@ -665,6 +666,13 @@ async function run(searchId, keyword) {
             consecutiveBlocks = 0;
 
             if (result && result.soldCount > 0) {
+              // Deduplicate — Etsy shows the same listing on multiple search pages
+              const listingId = (url.match(/listing\/(\d+)/) || [])[1];
+              if (listingId && reportedListingIds.has(listingId)) {
+                continue; // Already reported this listing
+              }
+              if (listingId) reportedListingIds.add(listingId);
+
               totalShortlisted++;
               log(`SHORTLISTED [${totalShortlisted}]: "${result.title.substring(0, 60)}" - ${result.soldCount} sold`);
 

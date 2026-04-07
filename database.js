@@ -43,6 +43,18 @@ function initDb() {
     db.exec('ALTER TABLE searches ADD COLUMN completed_at TEXT');
   }
 
+  // Migration: add unique index on (search_id, url) to prevent duplicates
+  const indexes = db.prepare("SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='listings'").all().map(r => r.name);
+  if (!indexes.includes('idx_listings_search_url')) {
+    // Remove existing duplicates first — keep the one with the lowest id
+    db.exec(`
+      DELETE FROM listings WHERE id NOT IN (
+        SELECT MIN(id) FROM listings GROUP BY search_id, url
+      )
+    `);
+    db.exec('CREATE UNIQUE INDEX idx_listings_search_url ON listings(search_id, url)');
+  }
+
   return db;
 }
 
@@ -87,7 +99,7 @@ function getSearch(id) {
 function addListing(searchId, { title, price, url, soldCount, screenshotPath, imageUrl }) {
   const created_at = new Date().toISOString();
   const stmt = db.prepare(`
-    INSERT INTO listings (search_id, title, price, url, sold_count, screenshot_path, image_url, created_at)
+    INSERT OR IGNORE INTO listings (search_id, title, price, url, sold_count, screenshot_path, image_url, created_at)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?)
   `);
   const info = stmt.run(searchId, title, price, url, soldCount, screenshotPath, imageUrl || null, created_at);
