@@ -27,6 +27,135 @@ function randomDelay(min = 500, max = 1500) {
   return new Promise(resolve => setTimeout(resolve, Math.floor(Math.random() * (max - min + 1)) + min));
 }
 
+/**
+ * Fetch Etsy search results via HTTP (no browser needed).
+ * Uses Etsy's internal search API endpoint which returns JSON with listing data.
+ * Falls back to scraping the HTML search page if the API doesn't work.
+ * Returns array of listing URLs found on the page.
+ */
+async function fetchSearchPageHTTP(keyword, pageNum) {
+  const COMMON_HEADERS = {
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+    'Accept-Language': 'en-US,en;q=0.9',
+    'Sec-Ch-Ua': '"Google Chrome";v="131", "Chromium";v="131", "Not_A Brand";v="24"',
+    'Sec-Ch-Ua-Mobile': '?0',
+    'Sec-Ch-Ua-Platform': '"Windows"',
+  };
+
+  // Strategy 1: Try Etsy's internal search API (returns JSON listing data)
+  try {
+    const apiUrl = `https://www.etsy.com/api/v3/ajax/bespoke/member/neu/specs/async_search_results?q=${encodeURIComponent(keyword)}&page=${pageNum}&ref=search_bar`;
+    log(`[HTTP] Trying Etsy internal API for page ${pageNum}`);
+    const resp = await fetch(apiUrl, {
+      headers: {
+        ...COMMON_HEADERS,
+        'Accept': 'application/json',
+        'X-Requested-With': 'XMLHttpRequest',
+        'Referer': `https://www.etsy.com/search?q=${encodeURIComponent(keyword)}&page=${pageNum}`,
+      },
+      redirect: 'follow',
+    });
+    if (resp.ok) {
+      const text = await resp.text();
+      // Extract listing IDs from the JSON/HTML response
+      const seenIds = new Set();
+      const urls = [];
+      const regex = /listing\/(\d+)/g;
+      let match;
+      while ((match = regex.exec(text)) !== null) {
+        const id = match[1];
+        if (seenIds.has(id)) continue;
+        seenIds.add(id);
+        urls.push(`https://www.etsy.com/listing/${id}/`);
+      }
+      if (urls.length > 0) {
+        log(`[HTTP] Internal API page ${pageNum}: found ${urls.length} listings`);
+        return urls;
+      }
+    } else {
+      log(`[HTTP] Internal API returned ${resp.status}`);
+    }
+  } catch (err) {
+    log(`[HTTP] Internal API error: ${err.message}`);
+  }
+
+  // Strategy 2: Try the regular search page HTML
+  try {
+    const url = `https://www.etsy.com/search?q=${encodeURIComponent(keyword)}&ref=search_bar&page=${pageNum}`;
+    log(`[HTTP] Trying regular search page ${pageNum}`);
+    const resp = await fetch(url, {
+      headers: {
+        ...COMMON_HEADERS,
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+        'Sec-Fetch-Dest': 'document',
+        'Sec-Fetch-Mode': 'navigate',
+        'Sec-Fetch-Site': 'none',
+        'Sec-Fetch-User': '?1',
+        'Upgrade-Insecure-Requests': '1',
+      },
+      redirect: 'follow',
+    });
+    if (resp.ok) {
+      const html = await resp.text();
+      if (!html.includes('captcha-delivery') && !html.includes('Verification Required')) {
+        const seenIds = new Set();
+        const urls = [];
+        const regex = /https:\/\/www\.etsy\.com\/(?:[\w-]+\/)?listing\/(\d+)\/[^"'\s?#]*/g;
+        let match2;
+        while ((match2 = regex.exec(html)) !== null) {
+          if (seenIds.has(match2[1])) continue;
+          seenIds.add(match2[1]);
+          urls.push(match2[0]);
+        }
+        log(`[HTTP] HTML page ${pageNum}: found ${urls.length} listings`);
+        if (urls.length > 0) return urls;
+      } else {
+        log(`[HTTP] Search page ${pageNum} blocked by CAPTCHA`);
+      }
+    } else {
+      log(`[HTTP] Search page ${pageNum} returned status ${resp.status}`);
+    }
+  } catch (err) {
+    log(`[HTTP] HTML page error: ${err.message}`);
+  }
+
+  // Strategy 3: Use DuckDuckGo HTML search as a proxy to find Etsy listings
+  try {
+    const ddgUrl = `https://html.duckduckgo.com/html/?q=site%3Aetsy.com+${encodeURIComponent(keyword)}&s=${(pageNum - 1) * 30}`;
+    log(`[HTTP] Trying DuckDuckGo for page ${pageNum}`);
+    const resp = await fetch(ddgUrl, {
+      headers: {
+        ...COMMON_HEADERS,
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+      },
+      redirect: 'follow',
+    });
+    if (resp.ok) {
+      const html = await resp.text();
+      const seenIds = new Set();
+      const urls = [];
+      const regex = /https?:\/\/(?:www\.)?etsy\.com\/(?:[\w-]+\/)?listing\/(\d+)/g;
+      let match3;
+      while ((match3 = regex.exec(html)) !== null) {
+        if (seenIds.has(match3[1])) continue;
+        seenIds.add(match3[1]);
+        urls.push(`https://www.etsy.com/listing/${match3[1]}/`);
+      }
+      if (urls.length > 0) {
+        log(`[HTTP] DuckDuckGo page ${pageNum}: found ${urls.length} listings`);
+        return urls;
+      }
+    } else {
+      log(`[HTTP] DuckDuckGo returned ${resp.status}`);
+    }
+  } catch (err) {
+    log(`[HTTP] DuckDuckGo error: ${err.message}`);
+  }
+
+  log(`[HTTP] All HTTP strategies failed for page ${pageNum}`);
+  return null;
+}
+
 function log(...args) {
   console.log(`[scanner ${new Date().toISOString()}]`, ...args);
 }
@@ -48,13 +177,19 @@ async function reportListing(searchId, listing) {
 
 async function updateProgress(searchId, fields) {
   try {
-    await fetch(`${SERVER_BASE}/api/searches/${searchId}`, {
+    const res = await fetch(`${SERVER_BASE}/api/searches/${searchId}`, {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(fields),
     });
+    if (!res.ok) {
+      log('Warning: updateProgress got status', res.status);
+    }
+    const data = await res.json();
+    return data;
   } catch (err) {
     log('Error updating progress:', err.message);
+    return null;
   }
 }
 
@@ -206,8 +341,10 @@ async function checkListing(page, url) {
 
 async function launchBrowser() {
   if (IS_RAILWAY) {
-    log('Railway environment detected — launching headless Chromium');
-    const puppeteer = require('puppeteer');
+    log('Railway environment detected — launching headless Chromium with stealth');
+    const puppeteer = require('puppeteer-extra');
+    const StealthPlugin = require('puppeteer-extra-plugin-stealth');
+    puppeteer.use(StealthPlugin());
     const execPath = process.env.PUPPETEER_EXECUTABLE_PATH || undefined;
     if (execPath) log('Using Chromium at:', execPath);
     const browser = await puppeteer.launch({
@@ -220,6 +357,8 @@ async function launchBrowser() {
         '--disable-background-timer-throttling',
         '--disable-backgrounding-occluded-windows',
         '--disable-renderer-backgrounding',
+        '--disable-blink-features=AutomationControlled',
+        '--lang=en-US,en',
       ],
       defaultViewport: { width: 1920, height: 1080 },
     });
@@ -263,45 +402,93 @@ async function run(searchId, keyword) {
   let pagesCompleted = 0;
   const startTime = Date.now();
 
+  const REALISTIC_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
+
+  async function setupPage(page) {
+    await page.setViewport({ width: 1920, height: 1080 });
+    if (IS_RAILWAY) {
+      await page.setUserAgent(REALISTIC_UA);
+      await page.setExtraHTTPHeaders({
+        'accept-language': 'en-US,en;q=0.9',
+        'sec-ch-ua': '"Google Chrome";v="131", "Chromium";v="131", "Not_A Brand";v="24"',
+        'sec-ch-ua-mobile': '?0',
+        'sec-ch-ua-platform': '"Windows"',
+      });
+    }
+    await page.evaluateOnNewDocument(() => {
+      Object.defineProperty(navigator, 'webdriver', { get: () => false });
+      // Override plugins to look real
+      Object.defineProperty(navigator, 'plugins', {
+        get: () => [1, 2, 3, 4, 5],
+      });
+      Object.defineProperty(navigator, 'languages', {
+        get: () => ['en-US', 'en'],
+      });
+      // Fake Chrome runtime
+      window.chrome = { runtime: {}, loadTimes: function(){}, csi: function(){} };
+    });
+  }
+
   try {
     // Create the search results page (used to navigate search pages)
     const searchPage = await browser.newPage();
-    await searchPage.setViewport({ width: 1920, height: 1080 });
-    await searchPage.evaluateOnNewDocument(() => {
-      Object.defineProperty(navigator, 'webdriver', { get: () => false });
-    });
+    await setupPage(searchPage);
 
     // Create parallel listing checker tabs
     const listingPages = [];
     for (let i = 0; i < PARALLEL_TABS; i++) {
       const p = await browser.newPage();
-      await p.setViewport({ width: 1920, height: 1080 });
-      await p.evaluateOnNewDocument(() => {
-        Object.defineProperty(navigator, 'webdriver', { get: () => false });
-      });
+      await setupPage(p);
       listingPages.push(p);
     }
 
     await updateProgress(searchId, { status: 'running', total_pages: MAX_PAGES });
 
-    // Pre-flight: navigate to Etsy homepage first to warm up cookies/session
-    log('Pre-flight: loading Etsy homepage to establish session...');
-    try {
-      await searchPage.goto('https://www.etsy.com/', { waitUntil: 'networkidle2', timeout: 20000 });
-      await randomDelay(2000, 4000);
-      // Check if homepage is blocked
-      const homeBlocked = await searchPage.evaluate(() => {
-        const html = document.documentElement.innerHTML || '';
-        return html.includes('captcha-delivery') || html.includes('geo.captcha-delivery');
-      });
-      if (homeBlocked) {
-        log('WARNING: Etsy homepage blocked by CAPTCHA. Waiting 60s for manual solve...');
-        await new Promise(r => setTimeout(r, 60000));
-      } else {
-        log('Pre-flight OK - Etsy homepage loaded successfully');
+    if (!IS_RAILWAY) {
+      // Pre-flight: navigate to Etsy homepage first to warm up cookies/session (local only)
+      log('Pre-flight: loading Etsy homepage to establish session...');
+      try {
+        await searchPage.goto('https://www.etsy.com/', { waitUntil: 'networkidle2', timeout: 20000 });
+        await randomDelay(2000, 4000);
+        const homeBlocked = await searchPage.evaluate(() => {
+          const html = document.documentElement.innerHTML || '';
+          return html.includes('captcha-delivery') || html.includes('geo.captcha-delivery');
+        });
+        if (homeBlocked) {
+          log('WARNING: Etsy homepage blocked by CAPTCHA. Waiting 60s for manual solve...');
+          await new Promise(r => setTimeout(r, 60000));
+        } else {
+          log('Pre-flight OK - Etsy homepage loaded successfully');
+        }
+      } catch (err) {
+        log('Pre-flight warning:', err.message);
       }
-    } catch (err) {
-      log('Pre-flight warning:', err.message);
+    } else {
+      // Railway mode: quick connectivity test before starting
+      log('Railway mode: testing Etsy accessibility...');
+      try {
+        const testResp = await fetch('https://www.etsy.com/', {
+          headers: { 'User-Agent': REALISTIC_UA },
+          redirect: 'follow',
+        });
+        if (testResp.status === 403) {
+          const body = await testResp.text();
+          if (body.includes('captcha-delivery') || body.includes("var dd=")) {
+            log('Etsy is BLOCKED from this server IP (DataDome protection)');
+            log('Server-side scanning not possible. Search remains in "running" state for Chrome extension to pick up.');
+            log('Install the Chrome extension and open the dashboard to start scanning from your browser.');
+            try { await browser.close(); } catch {}
+            return;
+          }
+        } else if (testResp.ok) {
+          log('Etsy is accessible from this server! Proceeding with server-side scan.');
+        }
+      } catch (err) {
+        log('Etsy connectivity test failed:', err.message);
+        log('Server-side scanning not possible. Search remains in "running" state for Chrome extension.');
+        try { await browser.close(); } catch {}
+        return;
+      }
     }
 
     for (let pageNum = 1; pageNum <= MAX_PAGES; pageNum++) {
@@ -310,71 +497,128 @@ async function run(searchId, keyword) {
         break;
       }
 
-      const searchUrl = `https://www.etsy.com/search?q=${encodeURIComponent(keyword)}&ref=search_bar&page=${pageNum}`;
-      log(`Scanning page ${pageNum}/${MAX_PAGES}: ${searchUrl}`);
+      let listingUrls;
 
-      try {
-        await searchPage.goto(searchUrl, { waitUntil: 'networkidle2', timeout: 30000 });
-        await randomDelay(1000, 2000);
-
-        // Check for blocking
-        const blocked = await searchPage.evaluate(() => {
-          const html = document.documentElement.innerHTML || '';
-          const body = document.body ? document.body.innerText : '';
-          if (html.includes('captcha-delivery') || html.includes('geo.captcha-delivery')) return 'captcha';
-          if (body.includes('Verification Required')) return 'verification';
-          if (body.includes('Slide right to secure')) return 'slider';
-          return null;
-        });
-
-        if (blocked) {
+      if (IS_RAILWAY) {
+        // On Railway: try HTTP fetch first, then browser as fallback
+        listingUrls = await fetchSearchPageHTTP(keyword, pageNum);
+        if (!listingUrls) {
+          // Fallback: try browser with stealth
+          log(`HTTP fetch failed for page ${pageNum}, trying browser fallback...`);
+          try {
+            const searchUrl = `https://www.etsy.com/search?q=${encodeURIComponent(keyword)}&ref=search_bar&page=${pageNum}`;
+            await searchPage.goto(searchUrl, { waitUntil: 'networkidle2', timeout: 30000 });
+            await randomDelay(1000, 2000);
+            const blocked = await searchPage.evaluate(() => {
+              const html = document.documentElement.innerHTML || '';
+              if (html.includes('captcha-delivery') || html.includes('geo.captcha-delivery')) return true;
+              return false;
+            });
+            if (!blocked) {
+              listingUrls = await searchPage.evaluate(() => {
+                const seenIds = new Set();
+                const urls = [];
+                for (const a of document.querySelectorAll('a[href*="/listing/"]')) {
+                  const idMatch = a.href.match(/listing\/(\d+)/);
+                  if (!idMatch) continue;
+                  if (seenIds.has(idMatch[1])) continue;
+                  seenIds.add(idMatch[1]);
+                  const urlMatch = a.href.match(/(https:\/\/www\.etsy\.com\/(?:[\w-]+\/)?listing\/\d+\/[^?#]*)/);
+                  if (urlMatch) urls.push(urlMatch[1]);
+                }
+                return urls;
+              });
+              log(`Browser fallback page ${pageNum}: found ${listingUrls.length} listings`);
+            } else {
+              log(`Browser fallback also blocked on page ${pageNum}`);
+            }
+          } catch (err) {
+            log(`Browser fallback error: ${err.message}`);
+          }
+        }
+        if (!listingUrls || listingUrls.length === 0) {
           consecutiveBlocks++;
-          log(`Blocked on search page ${pageNum} (${blocked}), consecutive: ${consecutiveBlocks}`);
-          if (consecutiveBlocks >= 6) {
-            log('Too many consecutive blocks, giving up');
+          log(`Search page ${pageNum} failed all strategies, consecutive: ${consecutiveBlocks}`);
+          if (consecutiveBlocks >= 4) {
+            log('Too many consecutive failures, giving up');
             await updateProgress(searchId, { status: 'blocked' });
             break;
           }
-          // Wait longer each time — give user a chance to solve CAPTCHA manually
-          // in the visible Chrome window
-          const waitMs = Math.min(30000 + consecutiveBlocks * 15000, 90000);
-          log(`Waiting ${waitMs/1000}s before retry (solve CAPTCHA in the Chrome window if visible)...`);
-          await new Promise(r => setTimeout(r, waitMs));
+          await randomDelay(5000, 10000);
           pageNum--;
           continue;
         }
         consecutiveBlocks = 0;
+      } else {
+        // Local mode: use browser for search pages
+        const searchUrl = `https://www.etsy.com/search?q=${encodeURIComponent(keyword)}&ref=search_bar&page=${pageNum}`;
+        log(`Scanning page ${pageNum}/${MAX_PAGES}: ${searchUrl}`);
 
-        // Extract ALL listing URLs from the search page, deduplicated by listing ID
-        const listingUrls = await searchPage.evaluate(() => {
-          const seenIds = new Set();
-          const urls = [];
-          for (const a of document.querySelectorAll('a[href*="/listing/"]')) {
-            const idMatch = a.href.match(/listing\/(\d+)/);
-            if (!idMatch) continue;
-            const listingId = idMatch[1];
-            if (seenIds.has(listingId)) continue;
-            seenIds.add(listingId);
-            // Use the full URL for navigation
-            const urlMatch = a.href.match(/(https:\/\/www\.etsy\.com\/(?:[\w-]+\/)?listing\/\d+\/[^?#]*)/);
-            if (urlMatch) urls.push(urlMatch[1]);
+        try {
+          await searchPage.goto(searchUrl, { waitUntil: 'networkidle2', timeout: 30000 });
+          await randomDelay(1000, 2000);
+
+          const blocked = await searchPage.evaluate(() => {
+            const html = document.documentElement.innerHTML || '';
+            const body = document.body ? document.body.innerText : '';
+            if (html.includes('captcha-delivery') || html.includes('geo.captcha-delivery')) return 'captcha';
+            if (body.includes('Verification Required')) return 'verification';
+            if (body.includes('Slide right to secure')) return 'slider';
+            return null;
+          });
+
+          if (blocked) {
+            consecutiveBlocks++;
+            log(`Blocked on search page ${pageNum} (${blocked}), consecutive: ${consecutiveBlocks}`);
+            if (consecutiveBlocks >= 6) {
+              log('Too many consecutive blocks, giving up');
+              await updateProgress(searchId, { status: 'blocked' });
+              break;
+            }
+            const waitMs = Math.min(30000 + consecutiveBlocks * 15000, 90000);
+            log(`Waiting ${waitMs/1000}s before retry...`);
+            await new Promise(r => setTimeout(r, waitMs));
+            pageNum--;
+            continue;
           }
-          return urls;
-        });
+          consecutiveBlocks = 0;
 
-        log(`Page ${pageNum}: ${listingUrls.length} listings`);
+          listingUrls = await searchPage.evaluate(() => {
+            const seenIds = new Set();
+            const urls = [];
+            for (const a of document.querySelectorAll('a[href*="/listing/"]')) {
+              const idMatch = a.href.match(/listing\/(\d+)/);
+              if (!idMatch) continue;
+              const listingId = idMatch[1];
+              if (seenIds.has(listingId)) continue;
+              seenIds.add(listingId);
+              const urlMatch = a.href.match(/(https:\/\/www\.etsy\.com\/(?:[\w-]+\/)?listing\/\d+\/[^?#]*)/);
+              if (urlMatch) urls.push(urlMatch[1]);
+            }
+            return urls;
+          });
+        } catch (pageErr) {
+          log(`Error loading search page ${pageNum}: ${pageErr.message}`);
+          continue;
+        }
+      }
 
-        if (listingUrls.length === 0) {
+      log(`Page ${pageNum}: ${listingUrls.length} listings`);
+
+      if (listingUrls.length === 0) {
+        if (!IS_RAILWAY) {
           const debugPath = path.join(SCREENSHOT_DIR, `debug_page${pageNum}.png`);
           await searchPage.screenshot({ path: debugPath });
-          if (pageNum === 1) {
-            await updateProgress(searchId, { status: 'blocked' });
-            break;
-          }
+        }
+        if (pageNum === 1) {
+          await updateProgress(searchId, { status: 'blocked' });
           break;
         }
+        break;
+      }
 
-        // Process listings in parallel batches
+      // Process listings in parallel batches
+      try {
         for (let batchStart = 0; batchStart < listingUrls.length; batchStart += PARALLEL_TABS) {
           if (Date.now() - startTime > TIMEOUT_MS) break;
 

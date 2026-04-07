@@ -1,24 +1,26 @@
 {
   "manifest_version": 3,
   "name": "Etsy Scraper",
-  "version": "2.0",
+  "version": "2.1",
   "description": "Scrapes Etsy listings for the Etsy Scraper dashboard",
   "permissions": [
     "tabs",
     "activeTab",
     "scripting",
-    "alarms"
+    "alarms",
+    "storage"
   ],
   "host_permissions": [
     "https://www.etsy.com/*",
-    "http://localhost:3000/*"
+    "http://localhost:3000/*",
+    "https://etsy-scraper-production.up.railway.app/*"
   ],
   "background": {
     "service_worker": "background.js"
   },
   "content_scripts": [
     {
-      "matches": ["http://localhost:3000/*"],
+      "matches": ["http://localhost:3000/*", "https://etsy-scraper-production.up.railway.app/*"],
       "js": ["content.js"],
       "run_at": "document_idle"
     }

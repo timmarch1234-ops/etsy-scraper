@@ -1,6 +1,6 @@
 FROM node:22-slim
 
-# Install Chromium dependencies for Puppeteer
+# Install Chromium dependencies for Puppeteer + Playwright browser deps
 RUN apt-get update && apt-get install -y \
     chromium \
     fonts-liberation \

@@ -2,7 +2,28 @@
 // Etsy Scraper — Chrome Extension Background Service Worker
 // ---------------------------------------------------------------------------
 
-const API_BASE = 'http://localhost:3000/api';
+// Auto-detect API base: try Railway first, fall back to localhost
+const API_BASES = [
+  'https://etsy-scraper-production.up.railway.app/api',
+  'http://localhost:3000/api',
+];
+let API_BASE = API_BASES[0]; // default to Railway
+
+// Test connectivity and pick the right API base
+async function detectApiBase() {
+  for (const base of API_BASES) {
+    try {
+      const resp = await fetch(`${base}/searches`, { method: 'GET' });
+      if (resp.ok) {
+        API_BASE = base;
+        console.log(`[scraper] Using API: ${API_BASE}`);
+        return;
+      }
+    } catch {}
+  }
+  console.log(`[scraper] Could not reach any API, defaulting to: ${API_BASE}`);
+}
+detectApiBase();
 const MAX_PAGES = 20;
 const MAX_DURATION_MS = 30 * 60 * 1000; // 30 minutes
 

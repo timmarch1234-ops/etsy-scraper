@@ -24,6 +24,30 @@ app.use((req, res, next) => {
   next();
 });
 
+// Debug endpoint: test if we can reach Etsy from this server
+app.get('/api/test-etsy', async (req, res) => {
+  const testUrl = req.query.url || 'https://www.etsy.com/listing/1234567890/test';
+  try {
+    const resp = await fetch(testUrl, {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+        'Accept': 'text/html',
+      },
+      redirect: 'follow',
+    });
+    const text = await resp.text();
+    const hasCaptcha = text.includes('captcha-delivery') || text.includes('geo.captcha-delivery');
+    res.json({
+      status: resp.status,
+      hasCaptcha,
+      bodyLength: text.length,
+      bodyPreview: text.substring(0, 500),
+    });
+  } catch (err) {
+    res.json({ error: err.message });
+  }
+});
+
 app.use(express.static(path.join(__dirname, 'public')));
 app.use('/screenshots', express.static(SCREENSHOT_DIR));
 
@@ -86,6 +110,10 @@ app.post('/api/search', (req, res) => {
 });
 
 // Start server-side Puppeteer scanner for a search
+// On Railway: skips scanner spawn — the local-worker.js picks up "running" searches instead
+// Locally: spawns scanner.js as a child process
+const IS_RAILWAY = !!(process.env.RAILWAY_ENVIRONMENT || process.env.RAILWAY_PROJECT_ID);
+
 app.post('/api/searches/:id/start-scan', (req, res) => {
   try {
     const search = getSearch(req.params.id);
@@ -93,12 +121,19 @@ app.post('/api/searches/:id/start-scan', (req, res) => {
       return res.status(404).json({ error: 'Search not found' });
     }
 
+    if (IS_RAILWAY) {
+      // On Railway, Etsy blocks server-side scanning (DataDome).
+      // Leave the search as "running" so the local worker picks it up.
+      console.log(`Search ${search.id} ("${search.keyword}") created — waiting for local worker to pick it up`);
+      res.json({ ok: true, message: 'Search queued — waiting for local scanner', mode: 'remote' });
+      return;
+    }
+
     const scannerPath = path.join(__dirname, 'scanner.js');
     const logPath = path.join(__dirname, 'scanner.log');
-    const logFd = fs.openSync(logPath, 'a');
     const child = spawn('node', [scannerPath, search.id, search.keyword], {
       cwd: __dirname,
-      stdio: ['ignore', logFd, logFd],
+      stdio: ['ignore', 'pipe', 'pipe'],
       detached: true,
       env: {
         ...process.env,
@@ -106,8 +141,17 @@ app.post('/api/searches/:id/start-scan', (req, res) => {
         SERVER_BASE: `http://localhost:${PORT}`,
       },
     });
+    const logStream = fs.createWriteStream(logPath, { flags: 'a' });
+    child.stdout.on('data', (data) => {
+      process.stdout.write(data);
+      logStream.write(data);
+    });
+    child.stderr.on('data', (data) => {
+      process.stderr.write(data);
+      logStream.write(data);
+    });
+    child.on('close', () => logStream.close());
     child.unref();
-    fs.closeSync(logFd);
 
     console.log(`Scanner started for search ${search.id} (keyword: "${search.keyword}"), PID: ${child.pid}`);
     res.json({ ok: true, message: 'Scanner started', pid: child.pid });
