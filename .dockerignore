@@ -1,0 +1,14 @@
+node_modules
+data.db
+data.db-shm
+data.db-wal
+public/screenshots/*
+*.log
+.env
+cert.pem
+key.pem
+*.tsv
+*.txt
+screenshot-extension/
+.claude/
+.git

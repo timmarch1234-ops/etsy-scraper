@@ -12,10 +12,11 @@ const path = require('path');
 const fs = require('fs');
 const os = require('os');
 
-const SERVER_BASE = 'http://localhost:3000';
+const IS_RAILWAY = !!process.env.RAILWAY_ENVIRONMENT || !!process.env.RAILWAY_PROJECT_ID;
+const SERVER_BASE = process.env.SERVER_BASE || 'http://localhost:3000';
 const SCREENSHOT_DIR = path.join(__dirname, 'public', 'screenshots');
 const MAX_PAGES = 20;
-const PARALLEL_TABS = 4; // Number of tabs scanning listings concurrently
+const PARALLEL_TABS = IS_RAILWAY ? 2 : 4; // Fewer tabs on Railway to conserve memory
 const TIMEOUT_MS = 35 * 60 * 1000; // 35 minutes hard timeout
 const CHROME_PATH = '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome';
 const SCANNER_PROFILE = path.join(os.homedir(), '.etsy-scraper-profile');
@@ -203,27 +204,55 @@ async function checkListing(page, url) {
   }
 }
 
-async function run(searchId, keyword) {
-  log(`Starting scan for search=${searchId}, keyword="${keyword}"`);
-  log(`Settings: MAX_PAGES=${MAX_PAGES}, PARALLEL_TABS=${PARALLEL_TABS}, TIMEOUT=${TIMEOUT_MS/1000/60}min`);
-
-  fs.mkdirSync(SCREENSHOT_DIR, { recursive: true });
-  copyCookies();
-
-  const { chrome, wsUrl } = await launchChromeWithDebugPort();
-
-  const puppeteer = require('puppeteer-extra');
-  const StealthPlugin = require('puppeteer-extra-plugin-stealth');
-  puppeteer.use(StealthPlugin());
-
-  let browser;
-  try {
-    browser = await puppeteer.connect({
+async function launchBrowser() {
+  if (IS_RAILWAY) {
+    log('Railway environment detected — launching headless Chromium');
+    const puppeteer = require('puppeteer');
+    const execPath = process.env.PUPPETEER_EXECUTABLE_PATH || undefined;
+    if (execPath) log('Using Chromium at:', execPath);
+    const browser = await puppeteer.launch({
+      headless: 'new',
+      executablePath: execPath,
+      args: [
+        '--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage',
+        '--disable-gpu', '--disable-extensions', '--disable-sync',
+        '--no-first-run', '--window-size=1920,1080',
+        '--disable-background-timer-throttling',
+        '--disable-backgrounding-occluded-windows',
+        '--disable-renderer-backgrounding',
+      ],
+      defaultViewport: { width: 1920, height: 1080 },
+    });
+    return { browser, isLocal: false };
+  } else {
+    log('Local environment — launching real Chrome with cookies');
+    copyCookies();
+    const { chrome, wsUrl } = await launchChromeWithDebugPort();
+    const puppeteer = require('puppeteer-extra');
+    const StealthPlugin = require('puppeteer-extra-plugin-stealth');
+    puppeteer.use(StealthPlugin());
+    const browser = await puppeteer.connect({
       browserWSEndpoint: wsUrl,
       defaultViewport: { width: 1920, height: 1080 },
     });
+    return { browser, isLocal: true };
+  }
+}
+
+async function run(searchId, keyword) {
+  log(`Starting scan for search=${searchId}, keyword="${keyword}"`);
+  log(`Environment: ${IS_RAILWAY ? 'Railway' : 'Local'}`);
+  log(`Settings: MAX_PAGES=${MAX_PAGES}, PARALLEL_TABS=${PARALLEL_TABS}, TIMEOUT=${TIMEOUT_MS/1000/60}min`);
+
+  fs.mkdirSync(SCREENSHOT_DIR, { recursive: true });
+
+  let browser, isLocal;
+  try {
+    const result = await launchBrowser();
+    browser = result.browser;
+    isLocal = result.isLocal;
   } catch (err) {
-    log('Failed to connect to Chrome:', err.message);
+    log('Failed to launch browser:', err.message);
     await updateProgress(searchId, { status: 'error' });
     return;
   }
@@ -457,9 +486,13 @@ async function run(searchId, keyword) {
     log('Fatal error:', err.message, err.stack);
     await updateProgress(searchId, { status: 'error' });
   } finally {
-    try { await browser.disconnect(); } catch {}
     try {
-      execSync(`lsof -ti:${DEBUG_PORT} | xargs kill -9 2>/dev/null`, { stdio: 'ignore' });
+      if (isLocal) {
+        await browser.disconnect();
+        execSync(`lsof -ti:${DEBUG_PORT} | xargs kill -9 2>/dev/null`, { stdio: 'ignore' });
+      } else {
+        await browser.close();
+      }
     } catch {}
   }
 }

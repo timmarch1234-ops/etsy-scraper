@@ -100,7 +100,11 @@ app.post('/api/searches/:id/start-scan', (req, res) => {
       cwd: __dirname,
       stdio: ['ignore', logFd, logFd],
       detached: true,
-      env: { ...process.env, PATH: `/opt/homebrew/bin:${process.env.PATH}` },
+      env: {
+        ...process.env,
+        PATH: `/opt/homebrew/bin:${process.env.PATH}`,
+        SERVER_BASE: `http://localhost:${PORT}`,
+      },
     });
     child.unref();
     fs.closeSync(logFd);
