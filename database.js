@@ -20,7 +20,8 @@ function initDb() {
       pages_scanned INTEGER NOT NULL DEFAULT 0,
       total_pages INTEGER NOT NULL DEFAULT 20,
       listings_scanned INTEGER NOT NULL DEFAULT 0,
-      listings_shortlisted INTEGER NOT NULL DEFAULT 0
+      listings_shortlisted INTEGER NOT NULL DEFAULT 0,
+      completed_at TEXT
     );
 
     CREATE TABLE IF NOT EXISTS listings (
@@ -35,6 +36,12 @@ function initDb() {
       created_at TEXT NOT NULL
     );
   `);
+
+  // Migration: add completed_at if missing
+  const cols = db.pragma('table_info(searches)').map(c => c.name);
+  if (!cols.includes('completed_at')) {
+    db.exec('ALTER TABLE searches ADD COLUMN completed_at TEXT');
+  }
 
   return db;
 }
@@ -57,6 +64,12 @@ function updateSearch(id, fields) {
   ];
   const entries = Object.entries(fields).filter(([k]) => allowed.includes(k));
   if (entries.length === 0) return;
+
+  // Auto-set completed_at when status changes to a terminal state
+  const newStatus = fields.status;
+  if (newStatus && ['success', 'complete', 'blocked', 'error'].includes(newStatus)) {
+    entries.push(['completed_at', new Date().toISOString()]);
+  }
 
   const sets = entries.map(([k]) => `${k} = ?`).join(', ');
   const values = entries.map(([, v]) => v);

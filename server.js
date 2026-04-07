@@ -39,6 +39,7 @@ function transformSearch(row) {
     totalPages: row.total_pages,
     listingsScanned: row.listings_scanned,
     shortlisted: row.listings_shortlisted,
+    completedAt: row.completed_at || null,
   };
 }
 

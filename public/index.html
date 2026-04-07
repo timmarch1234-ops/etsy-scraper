@@ -32,6 +32,7 @@
         <tr>
           <th>Keyword</th>
           <th>Started</th>
+          <th>Duration</th>
           <th>Status</th>
           <th>Listings Scanned</th>
           <th>Shortlisted</th>
@@ -40,7 +41,7 @@
         </tr>
       </thead>
       <tbody id="tableBody">
-        <tr class="empty-row"><td colspan="7">No searches yet. Enter a keyword above to get started.</td></tr>
+        <tr class="empty-row"><td colspan="8">No searches yet. Enter a keyword above to get started.</td></tr>
       </tbody>
     </table>
   </div>
@@ -86,9 +87,32 @@ async function deleteSearch(id) {
     return d.toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
   }
 
+  function formatDuration(startIso, endIso) {
+    if (!startIso) return '—';
+    const end = endIso ? new Date(endIso).getTime() : Date.now();
+    const elapsed = end - new Date(startIso).getTime();
+    if (elapsed < 0) return '0s';
+    const s = Math.floor(elapsed / 1000) % 60;
+    const m = Math.floor(elapsed / 60000) % 60;
+    const h = Math.floor(elapsed / 3600000);
+    if (h > 0) return h + 'h ' + m + 'm';
+    if (m > 0) return m + 'm ' + s + 's';
+    return s + 's';
+  }
+
+  let timerInterval = null;
+  function startTimerTick() {
+    if (timerInterval) return;
+    timerInterval = setInterval(() => {
+      document.querySelectorAll('[data-started]').forEach(el => {
+        el.textContent = formatDuration(el.dataset.started);
+      });
+    }, 1000);
+  }
+
   function renderTable(searches) {
     if (!searches || searches.length === 0) {
-      tableBody.innerHTML = '<tr class="empty-row"><td colspan="7">No searches yet. Enter a keyword above to get started.</td></tr>';
+      tableBody.innerHTML = '<tr class="empty-row"><td colspan="8">No searches yet. Enter a keyword above to get started.</td></tr>';
       return;
     }
 
@@ -98,9 +122,15 @@ async function deleteSearch(id) {
       const totalPages = s.totalPages || 20;
       const pagesScraped = s.pagesScraped || 0;
       const pct = Math.min(100, Math.round((pagesScraped / totalPages) * 100));
+      const startTime = s.startedAt || s.createdAt;
+      const isRunning = s.status === 'running' || s.status === 'pending';
+      const durationCell = isRunning
+        ? `<span class="timer-live" data-started="${escHtml(startTime)}">${formatDuration(startTime)}</span>`
+        : `<span class="timer-done">${formatDuration(startTime, s.completedAt)}</span>`;
       return `<tr>
         <td><strong>${escHtml(s.keyword)}</strong></td>
-        <td>${formatDate(s.startedAt || s.createdAt)}</td>
+        <td>${formatDate(startTime)}</td>
+        <td>${durationCell}</td>
         <td>${statusBadge(s.status)}</td>
         <td>${s.listingsScanned ?? 0}</td>
         <td>${s.shortlisted ?? 0}</td>
@@ -131,6 +161,7 @@ async function deleteSearch(id) {
       renderTable(searches);
 
       const hasRunning = searches.some(s => s.status === 'running' || s.status === 'pending');
+      if (hasRunning) startTimerTick();
       if (hasRunning && !refreshTimer) {
         refreshTimer = setInterval(loadSearches, 5000);
       } else if (!hasRunning && refreshTimer) {
