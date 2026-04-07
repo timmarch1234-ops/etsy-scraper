@@ -16,7 +16,7 @@ const IS_RAILWAY = !!process.env.RAILWAY_ENVIRONMENT || !!process.env.RAILWAY_PR
 const SERVER_BASE = process.env.SERVER_BASE || 'http://localhost:3000';
 const SCREENSHOT_DIR = path.join(__dirname, 'public', 'screenshots');
 const MAX_PAGES = 20;
-const PARALLEL_TABS = IS_RAILWAY ? 2 : 4; // Fewer tabs on Railway to conserve memory
+const PARALLEL_TABS = IS_RAILWAY ? 2 : 3; // Fewer parallel tabs to reduce DataDome detection
 const TIMEOUT_MS = 45 * 60 * 1000; // 45 minutes hard timeout
 const CHROME_PATH = '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome';
 const SCANNER_PROFILE = path.join(os.homedir(), '.etsy-scraper-profile');
@@ -193,7 +193,7 @@ async function updateProgress(searchId, fields) {
   }
 }
 
-function prepareProfile() {
+function prepareProfile(forceRefresh = false) {
   // Clone the entire Default profile from real Chrome to get ALL data:
   // cookies, local storage, IndexedDB, DataDome tokens, etc.
   // A cookie-only copy gets flagged by DataDome because it's missing
@@ -202,12 +202,12 @@ function prepareProfile() {
     const srcDefault = path.join(CHROME_PROFILE, 'Default');
     const dstDefault = path.join(SCANNER_PROFILE, 'Default');
 
-    // Only re-clone if the profile is older than 5 minutes or doesn't exist
-    const needsClone = !fs.existsSync(dstDefault) ||
+    // Re-clone if forced (CAPTCHA recovery), older than 5 minutes, or doesn't exist
+    const needsClone = forceRefresh || !fs.existsSync(dstDefault) ||
       (Date.now() - fs.statSync(dstDefault).mtimeMs > 5 * 60 * 1000);
 
     if (needsClone) {
-      log('Cloning full Chrome profile (cookies + local storage + DataDome tokens)...');
+      log(forceRefresh ? 'CAPTCHA recovery: force-refreshing Chrome profile clone...' : 'Cloning full Chrome profile (cookies + local storage + DataDome tokens)...');
       fs.mkdirSync(SCANNER_PROFILE, { recursive: true });
       // Remove old clone
       try { execSync(`rm -rf "${dstDefault}"`, { stdio: 'ignore' }); } catch {}
@@ -229,6 +229,22 @@ function prepareProfile() {
   } catch (err) {
     log('Warning: could not clone profile:', err.message);
   }
+}
+
+// Kill scanner Chrome, force-refresh profile, relaunch browser
+async function recoverFromCaptcha(browser) {
+  log('CAPTCHA recovery: killing Chrome, refreshing profile, relaunching...');
+  try {
+    await browser.disconnect();
+  } catch {}
+  try {
+    execSync(`lsof -ti:${DEBUG_PORT} | xargs kill -9 2>/dev/null`, { stdio: 'ignore' });
+  } catch {}
+  await new Promise(r => setTimeout(r, 2000));
+  prepareProfile(true); // force refresh
+  const result = await launchBrowser();
+  log('CAPTCHA recovery: browser relaunched with fresh profile');
+  return result;
 }
 
 async function launchChromeWithDebugPort() {
@@ -442,11 +458,11 @@ async function run(searchId, keyword) {
 
   try {
     // Create the search results page (used to navigate search pages)
-    const searchPage = await browser.newPage();
+    let searchPage = await browser.newPage();
     await setupPage(searchPage);
 
     // Create parallel listing checker tabs
-    const listingPages = [];
+    let listingPages = [];
     for (let i = 0; i < PARALLEL_TABS; i++) {
       const p = await browser.newPage();
       await setupPage(p);
@@ -457,22 +473,53 @@ async function run(searchId, keyword) {
 
     if (!IS_RAILWAY) {
       // Pre-flight: navigate to Etsy homepage first to warm up cookies/session (local only)
-      log('Pre-flight: loading Etsy homepage to establish session...');
-      try {
-        await searchPage.goto('https://www.etsy.com/', { waitUntil: 'networkidle2', timeout: 20000 });
-        await randomDelay(2000, 4000);
-        const homeBlocked = await searchPage.evaluate(() => {
-          const html = document.documentElement.innerHTML || '';
-          return html.includes('captcha-delivery') || html.includes('geo.captcha-delivery');
-        });
-        if (homeBlocked) {
-          log('WARNING: Etsy homepage blocked by CAPTCHA. Waiting 60s for manual solve...');
-          await new Promise(r => setTimeout(r, 60000));
-        } else {
-          log('Pre-flight OK - Etsy homepage loaded successfully');
+      // If CAPTCHA detected, auto-recover by refreshing profile and relaunching Chrome
+      let preflightPassed = false;
+      for (let attempt = 1; attempt <= 3; attempt++) {
+        log(`Pre-flight (attempt ${attempt}/3): loading Etsy homepage to establish session...`);
+        try {
+          await searchPage.goto('https://www.etsy.com/', { waitUntil: 'networkidle2', timeout: 20000 });
+          await randomDelay(2000, 4000);
+          const homeBlocked = await searchPage.evaluate(() => {
+            const html = document.documentElement.innerHTML || '';
+            return html.includes('captcha-delivery') || html.includes('geo.captcha-delivery');
+          });
+          if (homeBlocked) {
+            log(`Pre-flight CAPTCHA detected (attempt ${attempt}/3)`);
+            if (attempt < 3) {
+              // Kill Chrome, force-refresh profile from real Chrome, relaunch
+              const recovered = await recoverFromCaptcha(browser);
+              browser = recovered.browser;
+              isLocal = recovered.isLocal;
+              // Re-create pages after relaunch
+              searchPage = await browser.newPage();
+              await setupPage(searchPage);
+              listingPages.length = 0;
+              for (let i = 0; i < PARALLEL_TABS; i++) {
+                const p = await browser.newPage();
+                await setupPage(p);
+                listingPages.push(p);
+              }
+              // Wait before retry with increasing backoff
+              const waitSec = 30 * attempt;
+              log(`Waiting ${waitSec}s before retry...`);
+              await new Promise(r => setTimeout(r, waitSec * 1000));
+              continue;
+            } else {
+              log('CAPTCHA persists after 3 profile refreshes. Setting status to blocked.');
+              await updateProgress(searchId, { status: 'blocked' });
+              return;
+            }
+          } else {
+            log('Pre-flight OK - Etsy homepage loaded successfully');
+            preflightPassed = true;
+            break;
+          }
+        } catch (err) {
+          log('Pre-flight warning:', err.message);
+          preflightPassed = true; // network error, try scanning anyway
+          break;
         }
-      } catch (err) {
-        log('Pre-flight warning:', err.message);
       }
     } else {
       // Railway mode: quick connectivity test before starting
@@ -581,10 +628,31 @@ async function run(searchId, keyword) {
           if (blocked) {
             consecutiveBlocks++;
             log(`Blocked on search page ${pageNum} (${blocked}), consecutive: ${consecutiveBlocks}`);
-            if (consecutiveBlocks >= 3) {
-              log('CAPTCHA persisting — IP may be temporarily flagged. Try again in 15-30 min.');
-              await updateProgress(searchId, { status: 'blocked' });
-              break;
+            if (consecutiveBlocks >= 2) {
+              // After 2 consecutive blocks, try full recovery: kill Chrome, refresh profile, relaunch
+              log('CAPTCHA recovery: refreshing profile and relaunching browser...');
+              try {
+                const recovered = await recoverFromCaptcha(browser);
+                browser = recovered.browser;
+                isLocal = recovered.isLocal;
+                searchPage = await browser.newPage();
+                await setupPage(searchPage);
+                listingPages.length = 0;
+                for (let i = 0; i < PARALLEL_TABS; i++) {
+                  const p = await browser.newPage();
+                  await setupPage(p);
+                  listingPages.push(p);
+                }
+                log('Browser relaunched. Waiting 45s before retrying...');
+                await new Promise(r => setTimeout(r, 45000));
+                consecutiveBlocks = 0; // reset after recovery
+                pageNum--; // retry same page
+                continue;
+              } catch (recErr) {
+                log('Recovery failed:', recErr.message);
+                await updateProgress(searchId, { status: 'blocked' });
+                break;
+              }
             }
             const waitMs = Math.min(60000 + consecutiveBlocks * 30000, 120000);
             log(`Waiting ${waitMs/1000}s before retry...`);
@@ -725,8 +793,8 @@ async function run(searchId, keyword) {
           listings_shortlisted: totalShortlisted,
         });
 
-        // Short delay between search pages
-        await randomDelay(1500, 3000);
+        // Delay between search pages — longer to avoid DataDome detection
+        await randomDelay(3000, 6000);
       } catch (pageErr) {
         log(`Error on page ${pageNum}: ${pageErr.message}`);
         await updateProgress(searchId, { pages_scanned: pageNum });
