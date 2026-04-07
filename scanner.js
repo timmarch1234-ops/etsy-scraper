@@ -193,31 +193,41 @@ async function updateProgress(searchId, fields) {
   }
 }
 
-function copyCookies() {
+function prepareProfile() {
+  // Clone the entire Default profile from real Chrome to get ALL data:
+  // cookies, local storage, IndexedDB, DataDome tokens, etc.
+  // A cookie-only copy gets flagged by DataDome because it's missing
+  // the bot protection tokens stored in local storage/IndexedDB.
   try {
-    fs.mkdirSync(path.join(SCANNER_PROFILE, 'Default'), { recursive: true });
-    const src = path.join(CHROME_PROFILE, 'Default', 'Cookies');
-    const dst = path.join(SCANNER_PROFILE, 'Default', 'Cookies');
-    if (fs.existsSync(src)) {
-      // Use shell cp instead of fs.copyFileSync because Chrome uses SQLite WAL mode
-      // and copyFileSync may miss pending WAL writes, producing a truncated/corrupt copy
-      try { fs.unlinkSync(dst); } catch {}
-      execSync(`cp "${src}" "${dst}"`);
-      const srcSize = fs.statSync(src).size;
-      const dstSize = fs.statSync(dst).size;
-      log(`Copied Chrome cookies to scanner profile (${srcSize} -> ${dstSize} bytes)`);
-      if (dstSize < srcSize * 0.5) {
-        log('WARNING: Cookie copy may be truncated!');
-      }
+    const srcDefault = path.join(CHROME_PROFILE, 'Default');
+    const dstDefault = path.join(SCANNER_PROFILE, 'Default');
+
+    // Only re-clone if the profile is older than 5 minutes or doesn't exist
+    const needsClone = !fs.existsSync(dstDefault) ||
+      (Date.now() - fs.statSync(dstDefault).mtimeMs > 5 * 60 * 1000);
+
+    if (needsClone) {
+      log('Cloning full Chrome profile (cookies + local storage + DataDome tokens)...');
+      fs.mkdirSync(SCANNER_PROFILE, { recursive: true });
+      // Remove old clone
+      try { execSync(`rm -rf "${dstDefault}"`, { stdio: 'ignore' }); } catch {}
+      // Copy the entire Default profile directory
+      execSync(`cp -R "${srcDefault}" "${dstDefault}"`);
+      // Also copy Local State (needed for cookie decryption)
+      const lsSrc = path.join(CHROME_PROFILE, 'Local State');
+      const lsDst = path.join(SCANNER_PROFILE, 'Local State');
+      if (fs.existsSync(lsSrc)) execSync(`cp "${lsSrc}" "${lsDst}"`);
+      log('Profile clone complete');
+    } else {
+      log('Using existing profile clone (less than 5 min old)');
     }
-    const lsSrc = path.join(CHROME_PROFILE, 'Local State');
-    const lsDst = path.join(SCANNER_PROFILE, 'Local State');
-    if (fs.existsSync(lsSrc)) execSync(`cp "${lsSrc}" "${lsDst}"`);
+
+    // Remove singleton locks
     for (const f of ['SingletonLock', 'SingletonCookie', 'SingletonSocket']) {
       try { fs.unlinkSync(path.join(SCANNER_PROFILE, f)); } catch {}
     }
   } catch (err) {
-    log('Warning: could not copy cookies:', err.message);
+    log('Warning: could not clone profile:', err.message);
   }
 }
 
@@ -364,8 +374,8 @@ async function launchBrowser() {
     });
     return { browser, isLocal: false };
   } else {
-    log('Local environment — launching real Chrome with cookies');
-    copyCookies();
+    log('Local environment — launching real Chrome with full profile');
+    prepareProfile();
     const { chrome, wsUrl } = await launchChromeWithDebugPort();
     const puppeteer = require('puppeteer-extra');
     const StealthPlugin = require('puppeteer-extra-plugin-stealth');
@@ -570,12 +580,12 @@ async function run(searchId, keyword) {
           if (blocked) {
             consecutiveBlocks++;
             log(`Blocked on search page ${pageNum} (${blocked}), consecutive: ${consecutiveBlocks}`);
-            if (consecutiveBlocks >= 6) {
-              log('Too many consecutive blocks, giving up');
+            if (consecutiveBlocks >= 3) {
+              log('CAPTCHA persisting — IP may be temporarily flagged. Try again in 15-30 min.');
               await updateProgress(searchId, { status: 'blocked' });
               break;
             }
-            const waitMs = Math.min(30000 + consecutiveBlocks * 15000, 90000);
+            const waitMs = Math.min(60000 + consecutiveBlocks * 30000, 120000);
             log(`Waiting ${waitMs/1000}s before retry...`);
             await new Promise(r => setTimeout(r, waitMs));
             pageNum--;

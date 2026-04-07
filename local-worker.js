@@ -38,12 +38,15 @@ async function pollForSearches() {
     const searches = await res.json();
 
     for (const search of searches) {
+      // Only pick up searches created in the last 10 minutes (ignore stale ones)
+      const age = Date.now() - new Date(search.createdAt).getTime();
       const isNew = (search.status === 'running' || search.status === 'pending')
                     && (search.pagesScraped || 0) === 0
+                    && age < 10 * 60 * 1000
                     && !activeScans.has(search.id);
 
       if (isNew) {
-        log(`Found new search: "${search.keyword}" (${search.id})`);
+        log(`Found new search: "${search.keyword}" (${search.id}) — created ${Math.round(age / 1000)}s ago`);
         startScanner(search.id, search.keyword);
       }
     }
