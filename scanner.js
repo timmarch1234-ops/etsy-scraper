@@ -24,12 +24,28 @@ const MAX_PAGES = 20;
 const PARALLEL_TABS = IS_RAILWAY ? 2 : 3; // Fewer parallel tabs to reduce DataDome detection
 const TIMEOUT_MS = 45 * 60 * 1000; // 45 minutes hard timeout
 const CHROME_PATH = '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome';
-const SCANNER_PROFILE = path.join(os.homedir(), '.etsy-scraper-profile');
 const CHROME_PROFILE = path.join(os.homedir(), 'Library', 'Application Support', 'Google', 'Chrome');
 const DEBUG_PORT = 9333;
 
 function randomDelay(min = 500, max = 1500) {
   return new Promise(resolve => setTimeout(resolve, Math.floor(Math.random() * (max - min + 1)) + min));
+}
+
+async function humanScroll(page) {
+  try {
+    await page.evaluate(async () => {
+      const delay = ms => new Promise(r => setTimeout(r, ms));
+      const totalHeight = document.body.scrollHeight;
+      const viewHeight = window.innerHeight;
+      let scrolled = 0;
+      while (scrolled < totalHeight * 0.7) {
+        const step = Math.floor(Math.random() * 300) + 100;
+        window.scrollBy(0, step);
+        scrolled += step;
+        await delay(Math.floor(Math.random() * 200) + 50);
+      }
+    });
+  } catch {}
 }
 
 /**
@@ -198,95 +214,87 @@ async function updateProgress(searchId, fields) {
   }
 }
 
-function prepareProfile(forceRefresh = false) {
-  // Clone the entire Default profile from real Chrome to get ALL data:
-  // cookies, local storage, IndexedDB, DataDome tokens, etc.
-  // A cookie-only copy gets flagged by DataDome because it's missing
-  // the bot protection tokens stored in local storage/IndexedDB.
-  try {
-    const srcDefault = path.join(CHROME_PROFILE, 'Default');
-    const dstDefault = path.join(SCANNER_PROFILE, 'Default');
-
-    // Re-clone if forced (CAPTCHA recovery), older than 5 minutes, or doesn't exist
-    const needsClone = forceRefresh || !fs.existsSync(dstDefault) ||
-      (Date.now() - fs.statSync(dstDefault).mtimeMs > 5 * 60 * 1000);
-
-    if (needsClone) {
-      log(forceRefresh ? 'CAPTCHA recovery: force-refreshing Chrome profile clone...' : 'Cloning full Chrome profile (cookies + local storage + DataDome tokens)...');
-      fs.mkdirSync(SCANNER_PROFILE, { recursive: true });
-      // Remove old clone
-      try { execSync(`rm -rf "${dstDefault}"`, { stdio: 'ignore' }); } catch {}
-      // Copy the entire Default profile directory
-      execSync(`cp -R "${srcDefault}" "${dstDefault}"`);
-      // Also copy Local State (needed for cookie decryption)
-      const lsSrc = path.join(CHROME_PROFILE, 'Local State');
-      const lsDst = path.join(SCANNER_PROFILE, 'Local State');
-      if (fs.existsSync(lsSrc)) execSync(`cp "${lsSrc}" "${lsDst}"`);
-      log('Profile clone complete');
-    } else {
-      log('Using existing profile clone (less than 5 min old)');
-    }
-
-    // Remove singleton locks
-    for (const f of ['SingletonLock', 'SingletonCookie', 'SingletonSocket']) {
-      try { fs.unlinkSync(path.join(SCANNER_PROFILE, f)); } catch {}
-    }
-  } catch (err) {
-    log('Warning: could not clone profile:', err.message);
-  }
-}
-
-// Kill scanner Chrome, force-refresh profile, relaunch browser
-async function recoverFromCaptcha(browser) {
-  log('CAPTCHA recovery: killing Chrome, refreshing profile, relaunching...');
-  try {
-    await browser.disconnect();
-  } catch {}
-  try {
-    execSync(`lsof -ti:${DEBUG_PORT} | xargs kill -9 2>/dev/null`, { stdio: 'ignore' });
-  } catch {}
-  await new Promise(r => setTimeout(r, 2000));
-  prepareProfile(true); // force refresh
-  const result = await launchBrowser();
-  log('CAPTCHA recovery: browser relaunched with fresh profile');
-  return result;
-}
+let userChromeWasRunning = false;
 
 async function launchChromeWithDebugPort() {
+  // Check if user's Chrome is already running — we need to close it to use the same profile
+  const chromeRunning = (() => {
+    try {
+      const result = execSync('pgrep -x "Google Chrome" 2>/dev/null', { encoding: 'utf8' }).trim();
+      return result.length > 0;
+    } catch { return false; }
+  })();
+
+  if (chromeRunning) {
+    userChromeWasRunning = true;
+    log('User Chrome is running — closing it gracefully to use the real profile...');
+    try {
+      // Graceful close via AppleScript (saves tabs for restore)
+      execSync('osascript -e \'tell application "Google Chrome" to quit\'', { stdio: 'ignore', timeout: 10000 });
+    } catch {}
+    // Wait for Chrome to fully close
+    for (let i = 0; i < 15; i++) {
+      await new Promise(r => setTimeout(r, 1000));
+      try {
+        execSync('pgrep -x "Google Chrome" 2>/dev/null', { encoding: 'utf8' });
+      } catch {
+        log('Chrome closed successfully');
+        break;
+      }
+    }
+    await new Promise(r => setTimeout(r, 2000));
+  }
+
+  // Kill any existing Chrome on the debug port
   try {
     execSync(`lsof -ti:${DEBUG_PORT} | xargs kill -9 2>/dev/null`, { stdio: 'ignore' });
   } catch {}
   await new Promise(r => setTimeout(r, 1000));
 
+  // Remove singleton locks from real Chrome profile so we can use it
+  for (const f of ['SingletonLock', 'SingletonCookie', 'SingletonSocket']) {
+    try { fs.unlinkSync(path.join(CHROME_PROFILE, f)); } catch {}
+  }
+
   const chromeArgs = [
     `--remote-debugging-port=${DEBUG_PORT}`,
-    `--user-data-dir=${SCANNER_PROFILE}`,
+    `--user-data-dir=${CHROME_PROFILE}`,  // Use REAL Chrome profile, not a clone
     '--no-first-run', '--no-default-browser-check',
     '--disable-popup-blocking', '--window-size=1920,1080',
-    '--window-position=50,50', '--disable-extensions',
-    '--disable-component-extensions-with-background-pages',
+    '--window-position=-2000,-2000',  // Off-screen so it doesn't interfere
     '--disable-sync', '--disable-translate', '--metrics-recording-only',
     '--disable-background-timer-throttling',
     '--disable-backgrounding-occluded-windows',
     '--disable-renderer-backgrounding',
+    '--restore-last-session',  // Restore user's tabs when they reopen Chrome
   ];
 
-  log('Launching Chrome with debug port', DEBUG_PORT);
+  log('Launching Chrome with REAL profile and debug port', DEBUG_PORT);
   const chrome = spawnChild(CHROME_PATH, chromeArgs, { stdio: 'ignore', detached: true });
   chrome.unref();
 
-  for (let i = 0; i < 20; i++) {
+  for (let i = 0; i < 30; i++) {
     await new Promise(r => setTimeout(r, 1000));
     try {
       const resp = await fetch(`http://localhost:${DEBUG_PORT}/json/version`);
       if (resp.ok) {
         const data = await resp.json();
-        log('Chrome started, wsUrl:', data.webSocketDebuggerUrl);
+        log('Chrome started with real profile, wsUrl:', data.webSocketDebuggerUrl);
         return { chrome, wsUrl: data.webSocketDebuggerUrl };
       }
     } catch {}
   }
   throw new Error('Chrome failed to start with debug port');
+}
+
+// Reopen Chrome for the user after scanning is done
+function reopenUserChrome() {
+  if (userChromeWasRunning) {
+    log('Reopening Chrome for user...');
+    try {
+      spawnChild('open', ['-a', 'Google Chrome'], { stdio: 'ignore', detached: true }).unref();
+    } catch {}
+  }
 }
 
 /**
@@ -396,7 +404,6 @@ async function launchBrowser() {
     return { browser, isLocal: false };
   } else {
     log('Local environment — launching real Chrome with full profile');
-    prepareProfile();
     const { chrome, wsUrl } = await launchChromeWithDebugPort();
     const puppeteer = require('puppeteer-extra');
     const StealthPlugin = require('puppeteer-extra-plugin-stealth');
@@ -431,7 +438,6 @@ async function run(searchId, keyword) {
   let totalShortlisted = 0;
   let consecutiveBlocks = 0;
   let pagesCompleted = 0;
-  let captchaExit = false; // Flag for CAPTCHA exit code 42
   const reportedListingIds = new Set(); // Track reported listing IDs to prevent duplicates
   const startTime = Date.now();
 
@@ -450,15 +456,7 @@ async function run(searchId, keyword) {
     }
     await page.evaluateOnNewDocument(() => {
       Object.defineProperty(navigator, 'webdriver', { get: () => false });
-      // Override plugins to look real
-      Object.defineProperty(navigator, 'plugins', {
-        get: () => [1, 2, 3, 4, 5],
-      });
-      Object.defineProperty(navigator, 'languages', {
-        get: () => ['en-US', 'en'],
-      });
-      // Fake Chrome runtime
-      window.chrome = { runtime: {}, loadTimes: function(){}, csi: function(){} };
+      // Don't override plugins/languages on local — real Chrome has real values
     });
   }
 
@@ -478,23 +476,27 @@ async function run(searchId, keyword) {
     await updateProgress(searchId, { status: 'running', total_pages: MAX_PAGES });
 
     if (!IS_RAILWAY) {
-      // Pre-flight: navigate to Etsy homepage first to warm up cookies/session (local only)
-      // If CAPTCHA detected, exit with code 42 so the worker can retry with a fresh profile
-      log('Pre-flight: loading Etsy homepage to establish session...');
+      // Pre-flight: warm up the session with natural browsing behavior
+      log('Pre-flight: warming up session on Etsy homepage...');
       try {
-        await searchPage.goto('https://www.etsy.com/', { waitUntil: 'networkidle2', timeout: 20000 });
+        await searchPage.goto('https://www.etsy.com/', { waitUntil: 'networkidle2', timeout: 30000 });
         await randomDelay(2000, 4000);
+
         const homeBlocked = await searchPage.evaluate(() => {
           const html = document.documentElement.innerHTML || '';
           return html.includes('captcha-delivery') || html.includes('geo.captcha-delivery');
         });
+
         if (homeBlocked) {
-          log('CAPTCHA detected on pre-flight. Exiting with code 42 for worker to retry with fresh profile.');
-          // Force immediate exit — worker will handle Chrome cleanup
+          log('CAPTCHA detected on pre-flight. Exiting with code 42 for worker to retry.');
           setTimeout(() => process.exit(42), 100);
-        } else {
-          log('Pre-flight OK - Etsy homepage loaded successfully');
+          return;
         }
+
+        // Scroll around naturally to build trust with DataDome
+        await humanScroll(searchPage);
+        await randomDelay(1000, 2000);
+        log('Pre-flight OK - session warmed up');
       } catch (err) {
         log('Pre-flight warning:', err.message);
       }
@@ -592,6 +594,9 @@ async function run(searchId, keyword) {
         try {
           await searchPage.goto(searchUrl, { waitUntil: 'networkidle2', timeout: 30000 });
           await randomDelay(1000, 2000);
+          // Scroll naturally before extracting listings
+          await humanScroll(searchPage);
+          await randomDelay(500, 1000);
 
           const blocked = await searchPage.evaluate(() => {
             const html = document.documentElement.innerHTML || '';
@@ -612,11 +617,8 @@ async function run(searchId, keyword) {
                 listings_scanned: totalListingsScanned,
                 listings_shortlisted: totalShortlisted,
               });
-              log('CAPTCHA persisting on search pages. Exiting with code 42 for worker to retry with fresh profile.');
-              captchaExit = true;
-              try { execSync(`lsof -ti:${DEBUG_PORT} | xargs kill -9 2>/dev/null`, { stdio: 'ignore' }); } catch {}
-              await new Promise(r => setTimeout(r, 500));
-              process.exitCode = 42;
+              log('CAPTCHA persisting on search pages. Exiting with code 42 for worker to retry.');
+              setTimeout(() => process.exit(42), 100);
               return;
             }
             const waitMs = Math.min(60000 + consecutiveBlocks * 30000, 120000);
@@ -672,11 +674,11 @@ async function run(searchId, keyword) {
           const results = await Promise.all(
             batch.map((url, idx) =>
               new Promise(resolve => {
-                // Stagger each tab by 300ms
+                // Stagger each tab by 500ms
                 setTimeout(async () => {
                   const result = await checkListing(listingPages[idx], url);
                   resolve({ url, result });
-                }, idx * 300);
+                }, idx * 500);
               })
             )
           );
@@ -744,7 +746,7 @@ async function run(searchId, keyword) {
           if (pageNum > MAX_PAGES) break;
 
           // Brief delay between batches
-          await randomDelay(300, 800);
+          await randomDelay(800, 1500);
         }
 
         pagesCompleted = pageNum;
@@ -781,18 +783,16 @@ async function run(searchId, keyword) {
     log('Fatal error:', err.message, err.stack);
     await updateProgress(searchId, { status: 'error' });
   } finally {
-    if (!captchaExit) {
-      try {
-        if (isLocal) {
-          await browser.disconnect();
-          execSync(`lsof -ti:${DEBUG_PORT} | xargs kill -9 2>/dev/null`, { stdio: 'ignore' });
-        } else {
-          await browser.close();
-        }
-      } catch {}
-    }
-    // Ensure CAPTCHA exit code is preserved
-    if (captchaExit) process.exitCode = 42;
+    try {
+      if (isLocal) {
+        await browser.disconnect();
+        execSync(`lsof -ti:${DEBUG_PORT} | xargs kill -9 2>/dev/null`, { stdio: 'ignore' });
+        // Reopen user's Chrome if we closed it
+        reopenUserChrome();
+      } else {
+        await browser.close();
+      }
+    } catch {}
   }
 }
 
