@@ -203,8 +203,7 @@ async function deleteSearch(id) {
       if (!refreshTimer) {
         refreshTimer = setInterval(loadSearches, 5000);
       }
-      // Navigate to results page so user can watch progress
-      window.location.href = 'results.html?id=' + data.id;
+      // Stay on dashboard — table auto-refreshes via loadSearches()
     } catch (err) {
       console.error('Failed to start search:', err);
       alert('Failed to start search. Check the console for details.');
