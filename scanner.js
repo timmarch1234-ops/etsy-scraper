@@ -19,10 +19,10 @@ process.on('unhandledRejection', (err) => {
 
 const IS_RAILWAY = !!process.env.RAILWAY_ENVIRONMENT || !!process.env.RAILWAY_PROJECT_ID;
 const SERVER_BASE = process.env.SERVER_BASE || 'http://localhost:3000';
-const SCREENSHOT_DIR = path.join(__dirname, 'public', 'screenshots');
+const SCREENSHOT_DIR = process.env.SCREENSHOT_DIR || path.join(__dirname, 'public', 'screenshots');
 const MAX_PAGES = 20;
-const PARALLEL_TABS = IS_RAILWAY ? 2 : 2; // Minimal parallel tabs to avoid DataDome
-const TIMEOUT_MS = 45 * 60 * 1000; // 45 minutes hard timeout
+const PARALLEL_TABS = IS_RAILWAY ? 2 : 4; // 4 local tabs for speed
+const TIMEOUT_MS = 30 * 60 * 1000; // 30 minutes hard timeout
 const CHROME_PATH = '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome';
 const CHROME_PROFILE = path.join(os.homedir(), 'Library', 'Application Support', 'Google', 'Chrome');
 const SCANNER_PROFILE = path.join(os.homedir(), '.etsy-scraper-profile');
@@ -39,11 +39,11 @@ async function humanScroll(page) {
       const totalHeight = document.body.scrollHeight;
       const viewHeight = window.innerHeight;
       let scrolled = 0;
-      while (scrolled < totalHeight * 0.7) {
-        const step = Math.floor(Math.random() * 300) + 100;
+      while (scrolled < totalHeight * 0.4) {
+        const step = Math.floor(Math.random() * 400) + 200;
         window.scrollBy(0, step);
         scrolled += step;
-        await delay(Math.floor(Math.random() * 200) + 50);
+        await delay(Math.floor(Math.random() * 80) + 20);
       }
     });
   } catch {}
@@ -255,6 +255,7 @@ async function launchChromeWithDebugPort() {
     '--no-first-run', '--no-default-browser-check',
     '--disable-popup-blocking', '--window-size=1920,1080',
     '--window-position=-2000,-2000',  // Off-screen
+    '--disable-session-crashed-bubble', '--hide-crash-restore-bubble',
     '--disable-sync', '--disable-translate', '--metrics-recording-only',
     '--disable-background-timer-throttling',
     '--disable-backgrounding-occluded-windows',
@@ -285,9 +286,9 @@ async function launchChromeWithDebugPort() {
  */
 async function checkListing(page, url) {
   try {
-    await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 15000 });
+    await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 12000 });
     // Short wait for urgency signals to render via JS API call
-    await new Promise(r => setTimeout(r, 1500));
+    await new Promise(r => setTimeout(r, 800));
 
     // Check for block
     const blocked = await page.evaluate(() => {
@@ -458,12 +459,30 @@ async function run(searchId, keyword) {
 
     await updateProgress(searchId, { status: 'running', total_pages: MAX_PAGES });
 
+    // Check if we're resuming a partially completed scan
+    let startPage = 1;
+    try {
+      const searchRes = await fetch(`${SERVER_BASE}/api/searches/${searchId}`);
+      if (searchRes.ok) {
+        const searchData = await searchRes.json();
+        if (searchData.pagesScraped > 0) {
+          startPage = searchData.pagesScraped + 1;
+          totalListingsScanned = searchData.listingsScanned || 0;
+          totalShortlisted = searchData.shortlisted || 0;
+          pagesCompleted = searchData.pagesScraped;
+          log(`Resuming from page ${startPage} (${totalListingsScanned} scanned, ${totalShortlisted} shortlisted so far)`);
+        }
+      }
+    } catch (err) {
+      log('Could not check resume state:', err.message);
+    }
+
     if (!IS_RAILWAY) {
       // Pre-flight: warm up the session with natural browsing behavior
       log('Pre-flight: warming up session on Etsy homepage...');
       try {
         await searchPage.goto('https://www.etsy.com/', { waitUntil: 'networkidle2', timeout: 30000 });
-        await randomDelay(2000, 4000);
+        await randomDelay(1000, 2000);
 
         const homeBlocked = await searchPage.evaluate(() => {
           const html = document.documentElement.innerHTML || '';
@@ -511,7 +530,7 @@ async function run(searchId, keyword) {
       }
     }
 
-    for (let pageNum = 1; pageNum <= MAX_PAGES; pageNum++) {
+    for (let pageNum = startPage; pageNum <= MAX_PAGES; pageNum++) {
       if (Date.now() - startTime > TIMEOUT_MS) {
         log('Timeout reached');
         break;
@@ -661,7 +680,7 @@ async function run(searchId, keyword) {
                 setTimeout(async () => {
                   const result = await checkListing(listingPages[idx], url);
                   resolve({ url, result });
-                }, idx * 800);
+                }, idx * 300);
               })
             )
           );
@@ -729,7 +748,7 @@ async function run(searchId, keyword) {
           if (pageNum > MAX_PAGES) break;
 
           // Brief delay between batches
-          await randomDelay(1500, 3000);
+          await randomDelay(500, 1200);
         }
 
         pagesCompleted = pageNum;
@@ -743,15 +762,18 @@ async function run(searchId, keyword) {
           listings_shortlisted: totalShortlisted,
         });
 
-        // Delay between search pages — long random delay to appear human
-        await randomDelay(5000, 10000);
+        // Delay between search pages
+        await randomDelay(2000, 4000);
       } catch (pageErr) {
         log(`Error on page ${pageNum}: ${pageErr.message}`);
         await updateProgress(searchId, { pages_scanned: pageNum });
       }
     }
 
-    const finalStatus = consecutiveBlocks >= 5 ? 'blocked' : 'success';
+    const allDone = pagesCompleted >= MAX_PAGES;
+    // Only mark as 'success' when all pages done. Keep 'running' if timed out mid-scan
+    // so the worker can resume and the dashboard timer keeps going.
+    const finalStatus = consecutiveBlocks >= 5 ? 'blocked' : (allDone ? 'success' : 'running');
     await updateProgress(searchId, {
       status: finalStatus,
       pages_scanned: pagesCompleted,
@@ -760,20 +782,36 @@ async function run(searchId, keyword) {
     });
 
     const totalTime = ((Date.now() - startTime) / 1000 / 60).toFixed(1);
-    log(`COMPLETE. Status: ${finalStatus}. Pages: ${pagesCompleted}/${MAX_PAGES}. Scanned: ${totalListingsScanned}. Shortlisted: ${totalShortlisted}. Time: ${totalTime}min`);
+    log(`${allDone ? 'COMPLETE' : 'TIMEOUT'}. Status: ${finalStatus}. Pages: ${pagesCompleted}/${MAX_PAGES}. Scanned: ${totalListingsScanned}. Shortlisted: ${totalShortlisted}. Time: ${totalTime}min`);
 
-  } catch (err) {
-    log('Fatal error:', err.message, err.stack);
-    await updateProgress(searchId, { status: 'error' });
-  } finally {
+    // Set exit code BEFORE browser cleanup (disconnect can crash the process)
+    process.exitCode = 0;
+
+    // Clean up browser — kill Chrome directly to avoid disconnect crash
     try {
       if (isLocal) {
-        await browser.disconnect();
         execSync(`lsof -ti:${DEBUG_PORT} | xargs kill -9 2>/dev/null`, { stdio: 'ignore' });
       } else {
         await browser.close();
       }
     } catch {}
+
+    setTimeout(() => process.exit(0), 200);
+    return;
+
+  } catch (err) {
+    log('Fatal error:', err.message, err.stack);
+    await updateProgress(searchId, { status: 'error' });
+    process.exitCode = 1;
+    try {
+      if (isLocal) {
+        execSync(`lsof -ti:${DEBUG_PORT} | xargs kill -9 2>/dev/null`, { stdio: 'ignore' });
+      } else {
+        await browser.close();
+      }
+    } catch {}
+    setTimeout(() => process.exit(1), 200);
+    return;
   }
 }
 

@@ -65,6 +65,16 @@ document.addEventListener('keydown', function(e) {
     return el.innerHTML;
   }
 
+  function sortByPrice(listings) {
+    return listings.sort(function(a, b) {
+      var ma = (a.price || '').match(/\$([\d.,]+)/);
+      var mb = (b.price || '').match(/\$([\d.,]+)/);
+      var pa = ma ? parseFloat(ma[1].replace(/,/g, '')) : 0;
+      var pb = mb ? parseFloat(mb[1].replace(/,/g, '')) : 0;
+      return pb - pa;
+    });
+  }
+
   function tierButtons(listingId, currentTier) {
     const tiers = [
       { value: 'pending', label: 'Pending', cls: 'tier-btn-pending' },
@@ -94,10 +104,17 @@ document.addEventListener('keydown', function(e) {
 
   async function load() {
     try {
-      const res = await fetch('/api/listings/all');
-      if (!res.ok) throw new Error(res.statusText);
-      const listings = await res.json();
+      let listings;
+      if (window.__PRELOADED_LISTINGS__) {
+        listings = window.__PRELOADED_LISTINGS__;
+        delete window.__PRELOADED_LISTINGS__;
+      } else {
+        const res = await fetch('/api/listings/all');
+        if (!res.ok) throw new Error(res.statusText);
+        listings = await res.json();
+      }
 
+      listings = sortByPrice(listings);
       const keywords = [...new Set(listings.map(l => l.keyword))];
       stats.innerHTML = `
         <span>Total: <strong>${listings.length}</strong></span>
@@ -115,9 +132,7 @@ document.addEventListener('keydown', function(e) {
           ? `<img class="card-img" src="${escHtml(imgSrc)}" alt="" loading="lazy" onerror="this.outerHTML='<div class=\\'card-img card-img-placeholder\\'><span>${escHtml((l.title||'?')[0].toUpperCase())}</span></div>'">`
           : `<div class="card-img card-img-placeholder"><span>${escHtml((l.title || '?')[0].toUpperCase())}</span></div>`;
 
-        const soldBadge = l.soldLast24h
-          ? `<span class="card-sold">${escHtml(String(l.soldLast24h))} sold in last 24 hours</span>`
-          : '';
+        const priceMatch = (l.price || '').match(/\$([\d.,]+)/); const cleanPrice = priceMatch ? '$' + priceMatch[1] : '';
 
         const screenshotLink = l.screenshot
           ? `<a href="#" class="screenshot-link" onclick="event.preventDefault();openLightbox('/screenshots/${escHtml(l.screenshot)}')">View screenshot</a>`
@@ -127,11 +142,11 @@ document.addEventListener('keydown', function(e) {
           ${img}
           <div class="card-body">
             <div class="card-title"><a href="${escHtml(l.url || '#')}" target="_blank" rel="noopener">${escHtml(l.title || 'Untitled')}</a></div>
-            <div class="card-price">${escHtml(l.price || '\u2014')}</div>
-            ${soldBadge}
-            ${screenshotLink}
-            <span class="card-keyword">${escHtml(l.keyword || 'Unknown')}</span>
+            <div class="card-meta">Price: ${escHtml(cleanPrice || '\u2014')}</div>
+            <div class="card-meta">Sold: ${l.soldLast24h || 0}</div>
+            ${l.keyword ? `<span class="card-keyword">${escHtml(l.keyword)}</span>` : ''}
             ${tierButtons(l.id, l.tier || 'pending')}
+            ${screenshotLink}
           </div>
         </div>`;
       }).join('') + '</div>';

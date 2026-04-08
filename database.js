@@ -15,7 +15,7 @@ function initDb() {
     CREATE TABLE IF NOT EXISTS searches (
       id TEXT PRIMARY KEY,
       keyword TEXT NOT NULL,
-      status TEXT NOT NULL DEFAULT 'running' CHECK(status IN ('running', 'success', 'blocked', 'error', 'complete')),
+      status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending', 'running', 'success', 'blocked', 'error', 'complete')),
       created_at TEXT NOT NULL,
       pages_scanned INTEGER NOT NULL DEFAULT 0,
       total_pages INTEGER NOT NULL DEFAULT 20,
@@ -61,6 +61,38 @@ function initDb() {
     db.exec("ALTER TABLE listings ADD COLUMN tier TEXT NOT NULL DEFAULT 'pending'");
   }
 
+  // Migration: update CHECK constraint to include 'pending' status
+  // SQLite can't ALTER constraints, so we recreate the table
+  try {
+    const tableInfo = db.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='searches'").get();
+    if (tableInfo && tableInfo.sql && !tableInfo.sql.includes("'pending'")) {
+      // Must disable foreign keys temporarily to drop referenced table
+      db.pragma('foreign_keys = OFF');
+      try { db.exec('DROP TABLE IF EXISTS searches_new'); } catch {}
+      db.exec(`
+        CREATE TABLE searches_new (
+          id TEXT PRIMARY KEY,
+          keyword TEXT NOT NULL,
+          status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending', 'running', 'success', 'blocked', 'error', 'complete')),
+          created_at TEXT NOT NULL,
+          pages_scanned INTEGER NOT NULL DEFAULT 0,
+          total_pages INTEGER NOT NULL DEFAULT 20,
+          listings_scanned INTEGER NOT NULL DEFAULT 0,
+          listings_shortlisted INTEGER NOT NULL DEFAULT 0,
+          completed_at TEXT
+        );
+        INSERT INTO searches_new SELECT * FROM searches;
+        DROP TABLE searches;
+        ALTER TABLE searches_new RENAME TO searches;
+      `);
+      db.pragma('foreign_keys = ON');
+      console.log('Migration: updated searches CHECK constraint to include pending');
+    }
+  } catch (err) {
+    console.log('Migration note:', err.message);
+    try { db.pragma('foreign_keys = ON'); } catch {}
+  }
+
   return db;
 }
 
@@ -69,7 +101,7 @@ function createSearch(keyword) {
   const created_at = new Date().toISOString();
   const stmt = db.prepare(`
     INSERT INTO searches (id, keyword, status, created_at)
-    VALUES (?, ?, 'running', ?)
+    VALUES (?, ?, 'pending', ?)
   `);
   stmt.run(id, keyword, created_at);
   return db.prepare('SELECT * FROM searches WHERE id = ?').get(id);

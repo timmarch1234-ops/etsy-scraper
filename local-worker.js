@@ -1,31 +1,35 @@
 #!/usr/bin/env node
 /**
  * Local Worker — polls the Railway server for new searches and runs them locally.
+ * Processes one search at a time in queue order (oldest first).
  *
  * Usage:
  *   node local-worker.js
- *
- * This script polls the live Railway API every 10 seconds for searches with
- * status "running" and 0 pages scanned (i.e. freshly created). When it finds one,
- * it spawns scanner.js locally (which uses your real Chrome + cookies) and points
- * it at the Railway API so results appear on the live site.
  *
  * Set REMOTE_URL env var to override the Railway URL:
  *   REMOTE_URL=https://your-app.up.railway.app node local-worker.js
  */
 
-const { spawn } = require('child_process');
+const { spawn, execSync } = require('child_process');
 const path = require('path');
 
 const REMOTE_URL = process.env.REMOTE_URL || 'https://etsy-scraper-production.up.railway.app';
 const POLL_INTERVAL = 10000; // 10 seconds
 const SCANNER_PATH = path.join(__dirname, 'scanner.js');
 
-// Track which searches we've already started scanning
-const activeScans = new Set();
+const CAPTCHA_EXIT_CODE = 42;
+const MAX_CAPTCHA_RETRIES = 3;
+
+// Queue state
+let currentScan = null;  // { searchId, keyword } or null if idle
+const processedScans = new Set(); // Track completed/failed scans to avoid re-processing
 
 function log(...args) {
   console.log(`[worker ${new Date().toISOString()}]`, ...args);
+}
+
+function killChromeDebugPort() {
+  try { execSync('lsof -ti:9333 | xargs kill -9 2>/dev/null', { stdio: 'ignore' }); } catch {}
 }
 
 async function pollForSearches() {
@@ -37,30 +41,43 @@ async function pollForSearches() {
     }
     const searches = await res.json();
 
-    for (const search of searches) {
-      // Only pick up searches created in the last 10 minutes (ignore stale ones)
-      const age = Date.now() - new Date(search.createdAt).getTime();
-      const isNew = (search.status === 'running' || search.status === 'pending')
-                    && (search.pagesScraped || 0) === 0
-                    && age < 10 * 60 * 1000
-                    && !activeScans.has(search.id);
+    // Find pending searches (not yet started), oldest first
+    const pending = searches
+      .filter(s => {
+        const age = Date.now() - new Date(s.createdAt).getTime();
+        return (s.status === 'pending' || (s.status === 'running' && (s.pagesScraped || 0) === 0))
+          && age < 60 * 60 * 1000  // Ignore searches older than 1 hour
+          && !processedScans.has(s.id);
+      })
+      .sort((a, b) => new Date(a.createdAt) - new Date(b.createdAt)); // oldest first
 
-      if (isNew) {
-        log(`Found new search: "${search.keyword}" (${search.id}) — created ${Math.round(age / 1000)}s ago`);
-        startScanner(search.id, search.keyword);
+    if (pending.length > 0 && !currentScan) {
+      // Pick up the oldest pending search
+      const next = pending[0];
+      log(`Queue: ${pending.length} pending search(es). Starting: "${next.keyword}" (${next.id})`);
+      if (pending.length > 1) {
+        log(`  Queued: ${pending.slice(1).map(s => `"${s.keyword}"`).join(', ')}`);
       }
+      startScanner(next.id, next.keyword);
+    } else if (pending.length > 0 && currentScan) {
+      // Log queue status periodically
+      log(`Scanner busy with "${currentScan.keyword}". ${pending.length} search(es) queued.`);
     }
   } catch (err) {
     log('Poll error:', err.message);
   }
 }
 
-const CAPTCHA_EXIT_CODE = 42;
-const MAX_CAPTCHA_RETRIES = 3;
-
 function startScanner(searchId, keyword, captchaRetry = 0) {
-  activeScans.add(searchId);
-  log(`Starting local scanner for "${keyword}"${captchaRetry > 0 ? ` (CAPTCHA retry ${captchaRetry}/${MAX_CAPTCHA_RETRIES})` : ''}...`);
+  currentScan = { searchId, keyword };
+  log(`Starting scanner for "${keyword}"${captchaRetry > 0 ? ` (CAPTCHA retry ${captchaRetry}/${MAX_CAPTCHA_RETRIES})` : ''}...`);
+
+  // Mark search as running on the server
+  fetch(`${REMOTE_URL}/api/searches/${searchId}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ status: 'running' }),
+  }).catch(() => {});
 
   const child = spawn(process.execPath, [SCANNER_PATH, searchId, keyword], {
     cwd: __dirname,
@@ -72,36 +89,61 @@ function startScanner(searchId, keyword, captchaRetry = 0) {
     },
   });
 
-  child.on('close', (code) => {
-    if ((code === CAPTCHA_EXIT_CODE || code === null) && captchaRetry < MAX_CAPTCHA_RETRIES) {
-      // CAPTCHA detected — wait with increasing backoff and retry
-      // Using real Chrome profile, so longer wait lets DataDome cool down
-      const waitSec = 60 + (captchaRetry * 60); // 60s, 120s, 180s
+  child.on('close', async (code) => {
+    killChromeDebugPort();
+
+    if (code === CAPTCHA_EXIT_CODE && captchaRetry < MAX_CAPTCHA_RETRIES) {
+      const waitSec = 60 + (captchaRetry * 60);
       log(`Scanner for "${keyword}" hit CAPTCHA (exit ${code}). Retrying in ${waitSec}s... (attempt ${captchaRetry + 1}/${MAX_CAPTCHA_RETRIES})`);
-      // Kill any leftover Chrome on debug port
-      try { require('child_process').execSync('lsof -ti:9333 | xargs kill -9 2>/dev/null', { stdio: 'ignore' }); } catch {}
       setTimeout(() => {
         startScanner(searchId, keyword, captchaRetry + 1);
       }, waitSec * 1000);
+    } else if (code === 0 || code === null) {
+      // Check if all pages are done
+      try {
+        const res = await fetch(`${REMOTE_URL}/api/searches/${searchId}`);
+        if (res.ok) {
+          const search = await res.json();
+          if (search.pagesScraped < 20 && search.status !== 'blocked') {
+            log(`Scanner for "${keyword}" completed ${search.pagesScraped}/20 pages. Resuming in 10s...`);
+            setTimeout(() => {
+              startScanner(searchId, keyword, 0);
+            }, 10000);
+            return;
+          }
+        }
+      } catch (err) {
+        log('Error checking completion:', err.message);
+      }
+      log(`Scanner for "${keyword}" completed successfully.`);
+      finishCurrentScan(searchId);
     } else {
-      if (code === CAPTCHA_EXIT_CODE || code === null) {
+      if (code === CAPTCHA_EXIT_CODE) {
         log(`Scanner for "${keyword}" hit CAPTCHA ${MAX_CAPTCHA_RETRIES} times. Giving up.`);
       } else {
         log(`Scanner for "${keyword}" exited with code ${code}`);
       }
-      activeScans.delete(searchId);
+      finishCurrentScan(searchId);
     }
   });
 
   child.on('error', (err) => {
     log(`Scanner spawn error for "${keyword}": ${err.message}`);
-    activeScans.delete(searchId);
+    finishCurrentScan(searchId);
   });
+}
+
+function finishCurrentScan(searchId) {
+  processedScans.add(searchId);
+  currentScan = null;
+  log('Scanner idle — checking queue for next search...');
+  // Immediately poll for the next queued search
+  pollForSearches();
 }
 
 // Main loop
 log(`Local worker started. Polling ${REMOTE_URL} every ${POLL_INTERVAL / 1000}s`);
-log('Searches created on the live site will be picked up and scanned locally.');
+log('Searches are processed one at a time in queue order.');
 log('Press Ctrl+C to stop.\n');
 
 pollForSearches();

@@ -8,7 +8,7 @@ const { initDb, createSearch, updateSearch, getSearches, getSearch, addListing, 
 const multer = require('multer');
 const app = express();
 const PORT = process.env.PORT || 3000;
-const SCREENSHOT_DIR = path.join(__dirname, 'public', 'screenshots');
+const SCREENSHOT_DIR = process.env.SCREENSHOT_DIR || path.join(__dirname, 'public', 'screenshots');
 
 // Ensure screenshot dir exists
 fs.mkdirSync(SCREENSHOT_DIR, { recursive: true });
@@ -48,6 +48,53 @@ app.get('/api/test-etsy', async (req, res) => {
   }
 });
 
+// Serve index.html with preloaded search data for instant rendering
+app.get(['/', '/index.html'], (req, res) => {
+  try {
+    const searches = getSearches().map(transformSearch);
+    const indexPath = path.join(__dirname, 'public', 'index.html');
+    let html = fs.readFileSync(indexPath, 'utf8');
+    // Inject preloaded data before the closing </head> tag
+    const preloadScript = `<script>window.__PRELOADED_SEARCHES__ = ${JSON.stringify(searches)};</script>`;
+    html = html.replace('</head>', preloadScript + '\n</head>');
+    res.type('html').send(html);
+  } catch (err) {
+    res.status(500).send('Error loading page');
+  }
+});
+
+// Serve tier pages with preloaded data
+['pending', 'rejected', 'a-tier', 's-tier'].forEach(page => {
+  const tierMap = { 'pending': 'pending', 'rejected': 'rejected', 'a-tier': 'a', 's-tier': 's' };
+  app.get(`/${page}.html`, (req, res) => {
+    try {
+      const tier = tierMap[page];
+      const listings = sortByPriceDesc(getListingsByTier(tier).map(transformListing));
+      const filePath = path.join(__dirname, 'public', `${page}.html`);
+      let html = fs.readFileSync(filePath, 'utf8');
+      const preloadScript = `<script>window.__PRELOADED_LISTINGS__ = ${JSON.stringify(listings)};</script>`;
+      html = html.replace('</head>', preloadScript + '\n</head>');
+      res.type('html').send(html);
+    } catch (err) {
+      res.status(500).send('Error loading page');
+    }
+  });
+});
+
+// Serve shortlist page with preloaded data
+app.get('/shortlist.html', (req, res) => {
+  try {
+    const listings = sortByPriceDesc(getAllListings().map(transformListing));
+    const filePath = path.join(__dirname, 'public', 'shortlist.html');
+    let html = fs.readFileSync(filePath, 'utf8');
+    const preloadScript = `<script>window.__PRELOADED_LISTINGS__ = ${JSON.stringify(listings)};</script>`;
+    html = html.replace('</head>', preloadScript + '\n</head>');
+    res.type('html').send(html);
+  } catch (err) {
+    res.status(500).send('Error loading page');
+  }
+});
+
 app.use(express.static(path.join(__dirname, 'public')));
 app.use('/screenshots', express.static(SCREENSHOT_DIR));
 
@@ -65,6 +112,21 @@ function transformSearch(row) {
     shortlisted: row.listings_shortlisted,
     completedAt: row.completed_at || null,
   };
+}
+
+function extractPrice(priceStr) {
+  if (!priceStr) return 0;
+  const m = priceStr.match(/\$([\d.,]+)/);
+  if (!m) return 0;
+  return parseFloat(m[1].replace(/,/g, '')) || 0;
+}
+
+function sortByPriceDesc(listings) {
+  return listings.sort((a, b) => {
+    const pa = extractPrice(a.price);
+    const pb = extractPrice(b.price);
+    return pb - pa;
+  });
 }
 
 function transformListing(row) {
@@ -87,10 +149,11 @@ function transformListing(row) {
 app.get('/api/listings/all', (req, res) => {
   try {
     const listings = getAllListings();
-    res.json(listings.map(row => ({
+    const transformed = listings.map(row => ({
       ...transformListing(row),
       keyword: row.search_keyword,
-    })));
+    }));
+    res.json(sortByPriceDesc(transformed));
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -179,7 +242,7 @@ app.get('/api/searches/:id', (req, res) => {
       return res.status(404).json({ error: 'Search not found' });
     }
     const listings = getListings(req.params.id);
-    res.json({ ...transformSearch(search), listings: listings.map(transformListing) });
+    res.json({ ...transformSearch(search), listings: sortByPriceDesc(listings.map(transformListing)) });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -189,7 +252,7 @@ app.get('/api/searches/:id', (req, res) => {
 app.get('/api/searches/:id/listings', (req, res) => {
   try {
     const listings = getListings(req.params.id);
-    res.json(listings.map(transformListing));
+    res.json(sortByPriceDesc(listings.map(transformListing)));
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -716,10 +779,11 @@ app.patch('/api/listings/:id/tier', (req, res) => {
 app.get('/api/listings/tier/:tier', (req, res) => {
   try {
     const listings = getListingsByTier(req.params.tier);
-    res.json(listings.map(row => ({
+    const transformed = listings.map(row => ({
       ...transformListing(row),
       keyword: row.search_keyword,
-    })));
+    }));
+    res.json(sortByPriceDesc(transformed));
   } catch (err) {
     res.status(500).json({ error: err.message });
   }

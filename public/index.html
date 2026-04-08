@@ -76,12 +76,13 @@ async function deleteSearch(id) {
       completed:'badge-success',
       blocked:  'badge-blocked',
       running:  'badge-running',
-      pending:  'badge-running',
+      pending:  'badge-pending',
       error:    'badge-error',
       failed:   'badge-error',
     };
     const cls = map[status] || 'badge-error';
-    return `<span class="badge ${cls}">${status}</span>`;
+    const label = status === 'pending' ? 'Queued' : status.charAt(0).toUpperCase() + status.slice(1);
+    return `<span class="badge ${cls}">${label}</span>`;
   }
 
   function formatDate(iso) {
@@ -126,10 +127,13 @@ async function deleteSearch(id) {
       const pagesScraped = s.pagesScraped || 0;
       const pct = Math.min(100, Math.round((pagesScraped / totalPages) * 100));
       const startTime = s.startedAt || s.createdAt;
-      const isRunning = s.status === 'running' || s.status === 'pending';
-      const durationCell = isRunning
-        ? `<span class="timer-live" data-started="${escHtml(startTime)}">${formatDuration(startTime)}</span>`
-        : `<span class="timer-done">${formatDuration(startTime, s.completedAt)}</span>`;
+      const isRunning = s.status === 'running';
+      const isPending = s.status === 'pending';
+      const durationCell = isPending
+        ? `<span class="timer-queued">—</span>`
+        : isRunning
+          ? `<span class="timer-live" data-started="${escHtml(startTime)}">${formatDuration(startTime)}</span>`
+          : `<span class="timer-done">${formatDuration(startTime, s.completedAt)}</span>`;
       return `<tr>
         <td><strong>${escHtml(s.keyword)}</strong></td>
         <td>${formatDate(startTime)}</td>
@@ -157,10 +161,17 @@ async function deleteSearch(id) {
 
   async function loadSearches() {
     try {
-      const res = await fetch('/api/searches');
-      if (!res.ok) throw new Error(res.statusText);
-      const data = await res.json();
-      const searches = Array.isArray(data) ? data : (data.searches || []);
+      // Use preloaded data on first load for instant rendering
+      let searches;
+      if (window.__PRELOADED_SEARCHES__) {
+        searches = window.__PRELOADED_SEARCHES__;
+        delete window.__PRELOADED_SEARCHES__;
+      } else {
+        const res = await fetch('/api/searches');
+        if (!res.ok) throw new Error(res.statusText);
+        const data = await res.json();
+        searches = Array.isArray(data) ? data : (data.searches || []);
+      }
       renderTable(searches);
 
       const hasRunning = searches.some(s => s.status === 'running' || s.status === 'pending');
