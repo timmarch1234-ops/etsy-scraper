@@ -21,7 +21,7 @@ const IS_RAILWAY = !!process.env.RAILWAY_ENVIRONMENT || !!process.env.RAILWAY_PR
 const SERVER_BASE = process.env.SERVER_BASE || 'http://localhost:3000';
 const SCREENSHOT_DIR = path.join(__dirname, 'public', 'screenshots');
 const MAX_PAGES = 20;
-const PARALLEL_TABS = IS_RAILWAY ? 2 : 3; // Fewer parallel tabs to reduce DataDome detection
+const PARALLEL_TABS = IS_RAILWAY ? 2 : 2; // Minimal parallel tabs to avoid DataDome
 const TIMEOUT_MS = 45 * 60 * 1000; // 45 minutes hard timeout
 const CHROME_PATH = '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome';
 const CHROME_PROFILE = path.join(os.homedir(), 'Library', 'Application Support', 'Google', 'Chrome');
@@ -661,7 +661,7 @@ async function run(searchId, keyword) {
                 setTimeout(async () => {
                   const result = await checkListing(listingPages[idx], url);
                   resolve({ url, result });
-                }, idx * 500);
+                }, idx * 800);
               })
             )
           );
@@ -729,7 +729,7 @@ async function run(searchId, keyword) {
           if (pageNum > MAX_PAGES) break;
 
           // Brief delay between batches
-          await randomDelay(800, 1500);
+          await randomDelay(1500, 3000);
         }
 
         pagesCompleted = pageNum;
@@ -743,8 +743,8 @@ async function run(searchId, keyword) {
           listings_shortlisted: totalShortlisted,
         });
 
-        // Delay between search pages — longer to avoid DataDome detection
-        await randomDelay(3000, 6000);
+        // Delay between search pages — long random delay to appear human
+        await randomDelay(5000, 10000);
       } catch (pageErr) {
         log(`Error on page ${pageNum}: ${pageErr.message}`);
         await updateProgress(searchId, { pages_scanned: pageNum });
