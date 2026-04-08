@@ -25,6 +25,7 @@ const PARALLEL_TABS = IS_RAILWAY ? 2 : 3; // Fewer parallel tabs to reduce DataD
 const TIMEOUT_MS = 45 * 60 * 1000; // 45 minutes hard timeout
 const CHROME_PATH = '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome';
 const CHROME_PROFILE = path.join(os.homedir(), 'Library', 'Application Support', 'Google', 'Chrome');
+const SCANNER_PROFILE = path.join(os.homedir(), '.etsy-scraper-profile');
 const DEBUG_PORT = 9333;
 
 function randomDelay(min = 500, max = 1500) {
@@ -214,62 +215,53 @@ async function updateProgress(searchId, fields) {
   }
 }
 
-let userChromeWasRunning = false;
+function prepareProfile() {
+  // Clone the entire Default profile from real Chrome to get ALL data:
+  // cookies, local storage, IndexedDB, DataDome tokens, etc.
+  try {
+    const srcDefault = path.join(CHROME_PROFILE, 'Default');
+    const dstDefault = path.join(SCANNER_PROFILE, 'Default');
+
+    // Always re-clone for freshest DataDome tokens
+    log('Cloning Chrome profile (cookies + local storage + DataDome tokens)...');
+    fs.mkdirSync(SCANNER_PROFILE, { recursive: true });
+    try { execSync(`rm -rf "${dstDefault}"`, { stdio: 'ignore' }); } catch {}
+    execSync(`cp -R "${srcDefault}" "${dstDefault}"`);
+    // Copy Local State (needed for cookie decryption)
+    const lsSrc = path.join(CHROME_PROFILE, 'Local State');
+    const lsDst = path.join(SCANNER_PROFILE, 'Local State');
+    if (fs.existsSync(lsSrc)) execSync(`cp "${lsSrc}" "${lsDst}"`);
+    log('Profile clone complete');
+
+    // Remove singleton locks
+    for (const f of ['SingletonLock', 'SingletonCookie', 'SingletonSocket']) {
+      try { fs.unlinkSync(path.join(SCANNER_PROFILE, f)); } catch {}
+    }
+  } catch (err) {
+    log('Warning: could not clone profile:', err.message);
+  }
+}
 
 async function launchChromeWithDebugPort() {
-  // Check if user's Chrome is already running — we need to close it to use the same profile
-  const chromeRunning = (() => {
-    try {
-      const result = execSync('pgrep -x "Google Chrome" 2>/dev/null', { encoding: 'utf8' }).trim();
-      return result.length > 0;
-    } catch { return false; }
-  })();
-
-  if (chromeRunning) {
-    userChromeWasRunning = true;
-    log('User Chrome is running — closing it gracefully to use the real profile...');
-    try {
-      // Graceful close via AppleScript (saves tabs for restore)
-      execSync('osascript -e \'tell application "Google Chrome" to quit\'', { stdio: 'ignore', timeout: 10000 });
-    } catch {}
-    // Wait for Chrome to fully close
-    for (let i = 0; i < 15; i++) {
-      await new Promise(r => setTimeout(r, 1000));
-      try {
-        execSync('pgrep -x "Google Chrome" 2>/dev/null', { encoding: 'utf8' });
-      } catch {
-        log('Chrome closed successfully');
-        break;
-      }
-    }
-    await new Promise(r => setTimeout(r, 2000));
-  }
-
   // Kill any existing Chrome on the debug port
   try {
     execSync(`lsof -ti:${DEBUG_PORT} | xargs kill -9 2>/dev/null`, { stdio: 'ignore' });
   } catch {}
   await new Promise(r => setTimeout(r, 1000));
 
-  // Remove singleton locks from real Chrome profile so we can use it
-  for (const f of ['SingletonLock', 'SingletonCookie', 'SingletonSocket']) {
-    try { fs.unlinkSync(path.join(CHROME_PROFILE, f)); } catch {}
-  }
-
   const chromeArgs = [
     `--remote-debugging-port=${DEBUG_PORT}`,
-    `--user-data-dir=${CHROME_PROFILE}`,  // Use REAL Chrome profile, not a clone
+    `--user-data-dir=${SCANNER_PROFILE}`,
     '--no-first-run', '--no-default-browser-check',
     '--disable-popup-blocking', '--window-size=1920,1080',
-    '--window-position=-2000,-2000',  // Off-screen so it doesn't interfere
+    '--window-position=-2000,-2000',  // Off-screen
     '--disable-sync', '--disable-translate', '--metrics-recording-only',
     '--disable-background-timer-throttling',
     '--disable-backgrounding-occluded-windows',
     '--disable-renderer-backgrounding',
-    '--restore-last-session',  // Restore user's tabs when they reopen Chrome
   ];
 
-  log('Launching Chrome with REAL profile and debug port', DEBUG_PORT);
+  log('Launching Chrome with cloned profile and debug port', DEBUG_PORT);
   const chrome = spawnChild(CHROME_PATH, chromeArgs, { stdio: 'ignore', detached: true });
   chrome.unref();
 
@@ -279,22 +271,12 @@ async function launchChromeWithDebugPort() {
       const resp = await fetch(`http://localhost:${DEBUG_PORT}/json/version`);
       if (resp.ok) {
         const data = await resp.json();
-        log('Chrome started with real profile, wsUrl:', data.webSocketDebuggerUrl);
+        log('Chrome started, wsUrl:', data.webSocketDebuggerUrl);
         return { chrome, wsUrl: data.webSocketDebuggerUrl };
       }
     } catch {}
   }
   throw new Error('Chrome failed to start with debug port');
-}
-
-// Reopen Chrome for the user after scanning is done
-function reopenUserChrome() {
-  if (userChromeWasRunning) {
-    log('Reopening Chrome for user...');
-    try {
-      spawnChild('open', ['-a', 'Google Chrome'], { stdio: 'ignore', detached: true }).unref();
-    } catch {}
-  }
 }
 
 /**
@@ -403,7 +385,8 @@ async function launchBrowser() {
     });
     return { browser, isLocal: false };
   } else {
-    log('Local environment — launching real Chrome with full profile');
+    log('Local environment — cloning profile and launching Chrome');
+    prepareProfile();
     const { chrome, wsUrl } = await launchChromeWithDebugPort();
     const puppeteer = require('puppeteer-extra');
     const StealthPlugin = require('puppeteer-extra-plugin-stealth');
@@ -787,8 +770,6 @@ async function run(searchId, keyword) {
       if (isLocal) {
         await browser.disconnect();
         execSync(`lsof -ti:${DEBUG_PORT} | xargs kill -9 2>/dev/null`, { stdio: 'ignore' });
-        // Reopen user's Chrome if we closed it
-        reopenUserChrome();
       } else {
         await browser.close();
       }
