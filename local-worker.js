@@ -57,7 +57,6 @@ async function pollForSearches() {
 
 const CAPTCHA_EXIT_CODE = 42;
 const MAX_CAPTCHA_RETRIES = 3;
-const PROFILE_DIR = require('path').join(require('os').homedir(), '.etsy-scraper-profile');
 
 function startScanner(searchId, keyword, captchaRetry = 0) {
   activeScans.add(searchId);
@@ -75,21 +74,18 @@ function startScanner(searchId, keyword, captchaRetry = 0) {
 
   child.on('close', (code) => {
     if ((code === CAPTCHA_EXIT_CODE || code === null) && captchaRetry < MAX_CAPTCHA_RETRIES) {
-      // CAPTCHA detected or process killed — delete stale profile clone, wait, and retry
-      const waitSec = 30 + (captchaRetry * 15); // increasing backoff: 30s, 45s, 60s
-      log(`Scanner for "${keyword}" hit CAPTCHA (exit ${code}). Deleting profile and retrying in ${waitSec}s... (attempt ${captchaRetry + 1}/${MAX_CAPTCHA_RETRIES})`);
+      // CAPTCHA detected — wait with increasing backoff and retry
+      // Using real Chrome profile, so longer wait lets DataDome cool down
+      const waitSec = 60 + (captchaRetry * 60); // 60s, 120s, 180s
+      log(`Scanner for "${keyword}" hit CAPTCHA (exit ${code}). Retrying in ${waitSec}s... (attempt ${captchaRetry + 1}/${MAX_CAPTCHA_RETRIES})`);
       // Kill any leftover Chrome on debug port
       try { require('child_process').execSync('lsof -ti:9333 | xargs kill -9 2>/dev/null', { stdio: 'ignore' }); } catch {}
-      try {
-        require('child_process').execSync(`rm -rf "${PROFILE_DIR}/Default"`, { stdio: 'ignore' });
-        log('Deleted stale profile clone and killed Chrome');
-      } catch {}
       setTimeout(() => {
         startScanner(searchId, keyword, captchaRetry + 1);
       }, waitSec * 1000);
     } else {
       if (code === CAPTCHA_EXIT_CODE || code === null) {
-        log(`Scanner for "${keyword}" hit CAPTCHA ${MAX_CAPTCHA_RETRIES} times. Giving up — IP may need manual CAPTCHA solve.`);
+        log(`Scanner for "${keyword}" hit CAPTCHA ${MAX_CAPTCHA_RETRIES} times. Giving up.`);
       } else {
         log(`Scanner for "${keyword}" exited with code ${code}`);
       }
